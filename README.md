@@ -13,5 +13,3 @@ This repository contains the latest version of the FOLPS code.
 - Develop a function to perform IR resummation for the linear power spectrum:  
   `ir_resum_linear(k, pk, h)`
 
-- - meter bG2 y bGamma3 de Assasi
-- actualizar jax_tools.py
