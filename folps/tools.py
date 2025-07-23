@@ -696,7 +696,7 @@ def get_linear_ir(k, pk, h, pknow=None, fullrange=False, kmin=0.01, kmax=0.5, rb
 
 
 
-#### debugging ##
+#### debugging (old routine) ###
 from scipy.fft import dst, idst
 
 def pknwJ(k, PSLk, h):
