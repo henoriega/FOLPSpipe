@@ -1228,7 +1228,12 @@ class RSDMultipolesPowerSpectrumCalculator:
         if Winfty_all == False:
             W = 1.0
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 =======
+=======
+
+        return PK + W * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, b1, ctilde))
+>>>>>>> Stashed changes
 
         return PK + W * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, b1, ctilde))
 >>>>>>> Stashed changes
