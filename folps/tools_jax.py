@@ -716,3 +716,32 @@ def get_linear_ir_ini(k, pkl, pklnw, h=0.6711, k_BAO=1.0 / 104.):
     pkl_IR = pklnw + jnp.exp(-k**2 * sigma2) * (pkl - pklnw)
 
     return k, pkl_IR
+
+
+#AP tools
+def Hubble(Om, z_ev):
+    return jnp.sqrt(Om * (1 + z_ev)**3 + (1 - Om))
+
+def DA(Om, z_ev, nsteps=1000):
+    z_grid = jnp.linspace(0.0, z_ev, nsteps)
+    dz = z_ev / (nsteps - 1)
+    integrand = 1.0 / Hubble(Om, z_grid)
+    r = jnp.trapezoid(integrand, dx=dz)
+    return r / (1.0 + z_ev)
+
+def qpar_qperp(Omega_fid, Omega_m, z_pk, cosmo=None):
+     #check this eqs for CLASS  (see script in external disk)
+    if cosmo is not None:
+        DA_fid = DA(Omega_fid, z_pk)
+        H_fid = Hubble(Omega_fid, z_pk)
+        DA_m = cosmo.angular_distance(z_pk)
+        H_m = cosmo.Hubble(z_pk)
+    else:
+        DA_fid = DA(Omega_fid, z_pk)
+        DA_m = DA(Omega_m, z_pk)
+        H_fid = Hubble(Omega_fid, z_pk)
+        H_m = Hubble(Omega_m, z_pk)
+
+    qperp = DA_m / DA_fid
+    qpar = H_fid / H_m
+    return qpar, qperp

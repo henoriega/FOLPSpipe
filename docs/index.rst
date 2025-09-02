@@ -1,30 +1,43 @@
-Welcome to Folps's documentation!
-===================================
 
+FOLPSpipe: Documentation
+========================
 
+FOLPS (Fast and Efficient Computation of the Redshift-Space Power Spectrum and Bispectrum) is a high-performance tool for cosmological modeling, designed for large-scale structure (LSS) analyses with support for massive neutrinos and modified gravity theories.
 
+Main features:
+- Robust and accurate predictions for the power spectrum and bispectrum in redshift space.
+- Support for different backends (NumPy/JAX).
+- Auxiliary tools in `tools.py`.
 
-Building
-========
+Installation
+============
 
-To install, do 
+Clone the repository and navigate to the main folder:
 
-``python -m pip install git+https://github.com/dforero0896/geofptax.git --U``
+.. code-block:: bash
 
+   git clone <your-repo>
+   cd FOLPSpipe
+   pip install -r requirements.txt
 
-By default, the package is installed without the ``C`` extension, to do so (if you want to test or use the C module instead) do
+Basic Usage
+===========
 
-``GEOFPTAX_CEXT=1 python -m pip install git+https://github.com/dforero0896/geofptax.git --U``
+Example usage in Python:
 
+.. code-block:: python
 
+   from folps import folps
+   # Initialize and use the main functions here
+
+Documentation
+=============
 
 .. toctree::
    :maxdepth: 2
    :caption: Contents:
 
    api
-   plots
-   tests
 
 Indices and tables
 ==================

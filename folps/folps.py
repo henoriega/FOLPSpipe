@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[ ]:
 
 
 # ============================================================================================ #
@@ -49,7 +49,7 @@ class BackendManager:
                     print("⚠️ No GPU found. Using JAX with CPU.")
 
                 from jax import numpy as np
-                from tools_jax import interp, simpson, legendre, extrapolate, extrapolate_pklin, get_pknow, get_linear_ir, get_linear_ir_ini
+                from tools_jax import interp, simpson, legendre, extrapolate, extrapolate_pklin, get_pknow, get_linear_ir, get_linear_ir_ini, qpar_qperp
                 self.modules = {
                     "np": np,
                     "interp": interp,
@@ -60,6 +60,7 @@ class BackendManager:
                     "get_pknow": get_pknow,
                     "get_linear_ir":get_linear_ir,
                     "get_linear_ir_ini":get_linear_ir_ini,
+                    "qpar_qperp": qpar_qperp,
                 }
                 #self.using_jax = True
                 self.backend = 'jax'
@@ -70,7 +71,7 @@ class BackendManager:
         elif preferred_backend == 'numpy':
             print("✅ Using NumPy with CPU.")
             import numpy as np
-            from tools import interp, simpson, legendre, extrapolate, extrapolate_pklin, get_pknow, get_linear_ir, get_linear_ir_ini
+            from tools import interp, simpson, legendre, extrapolate, extrapolate_pklin, get_pknow, get_linear_ir, get_linear_ir_ini, qpar_qperp
             self.modules = {
                 "np": np,
                 "interp": interp,
@@ -81,6 +82,7 @@ class BackendManager:
                 "get_pknow": get_pknow,
                 "get_linear_ir":get_linear_ir,
                 "get_linear_ir_ini":get_linear_ir_ini,
+                "qpar_qperp": qpar_qperp,
             }
             #self.using_jax = False
             self.backend = 'numpy'
@@ -105,6 +107,7 @@ extrapolate_pklin = backend_manager.get_module("extrapolate_pklin")
 get_pknow = backend_manager.get_module("get_pknow")
 get_linear_ir = backend_manager.get_module("get_linear_ir")
 get_linear_ir_ini = backend_manager.get_module("get_linear_ir_ini")
+qpar_qperp = backend_manager.get_module("qpar_qperp")
 backend = backend_manager.backend
 #using_jax = backend_manager.using_jax
 
@@ -303,7 +306,7 @@ class MatrixCalculator:
     
         
         if remove_DeltaP:
-            print("removing $\Delta P(k,\mu)$... WARNING: This violates momentum conservation!!!")
+            print("removing $\Delta P(k,\mu)$") #... WARNING: This violates momentum conservation!!!
         
     def Imatrix(self, nu1, nu2):
         return 1 / (8 * np.pi**(3 / 2.)) * (special.gamma(3 / 2. - nu1) * special.gamma(3 / 2. - nu2) * special.gamma(nu1 + nu2 - 3 / 2.))\
@@ -808,8 +811,15 @@ class NonLinearPowerSpectrumCalculator:
         I3uuu_2b = self.K**3 * np.sum(vecff @ MtAfkmpfpfp_23 * vecf, axis=-1).real
 
         # D-RSD
-        I2uudd_1D = self.K**3 * (np.sum(vecf @ MB1_11 * vecf, axis=-1) + np.sum(vec @ MC1_11 * vecff, axis=-1)).real
-        I2uudd_2D = self.K**3 * (np.sum(vecf @ MB2_11 * vecf, axis=-1) + np.sum(vec @ MC2_11 * vecff, axis=-1)).real
+        if remove_DeltaP_status:
+            I2uudd_1D = self.K**3 * (np.sum(vecf @ MB1_11 * vecf, axis=-1)).real
+            I2uudd_2D = self.K**3 * (np.sum(vecf @ MB2_11 * vecf, axis=-1)).real
+        else:
+            I2uudd_1D = self.K**3 * (np.sum(vecf @ MB1_11 * vecf, axis=-1) + np.sum(vec @ MC1_11 * vecff, axis=-1)).real
+            I2uudd_2D = self.K**3 * (np.sum(vecf @ MB2_11 * vecf, axis=-1) + np.sum(vec @ MC2_11 * vecff, axis=-1)).real
+        
+        ##I2uudd_1D = self.K**3 * (np.sum(vecf @ MB1_11 * vecf, axis=-1) + np.sum(vec @ MC1_11 * vecff, axis=-1)).real
+        ##I2uudd_2D = self.K**3 * (np.sum(vecf @ MB2_11 * vecf, axis=-1) + np.sum(vec @ MC2_11 * vecff, axis=-1)).real
         I3uuud_2D = self.K**3 * np.sum(vecf @ MD2_21 * vecff, axis=-1).real
         I3uuud_3D = self.K**3 * np.sum(vecf @ MD3_21 * vecff, axis=-1).real
         I4uuuu_2D = self.K**3 * np.sum(vecff @ MD2_22 * vecff, axis=-1).real
@@ -818,7 +828,7 @@ class NonLinearPowerSpectrumCalculator:
         
         #new
         I3uuud_1_B = self.K**3 * np.sum(vecf_b @ MB1_21 * vec_b, axis=1).real
-        I4uuuu_1_B = self.K**3 * np.sum(vecf_b @ MB1_22 * vec_b, axis=1).real
+        I4uuuu_1_B = self.K**3 * np.sum(vecf_b @ MB1_22 * vecf_b, axis=1).real
         
         common_values = (
                         P22dd, P22dt, P22tt, Pb1b2, Pb1bs2, Pb22, Pb2bs2, Pb2s2, 
@@ -974,9 +984,9 @@ class NonLinearPowerSpectrumCalculator:
             
             if A_full_status:
                 #A function: b2 and bs2 contributions
-                I1udd_1_b2 = P22[22];    I1udd_1_bs2 = P22[25];       
-                I2uud_1_b2 = P22[23];    I2uud_1_bs2 = P22[26];    
-                I2uud_2_b2 = P22[24];    I2uud_2_bs2 = P22[27];    
+                I1udd_1_b2 = P22[24];    I1udd_1_bs2 = P22[27];       
+                I2uud_1_b2 = P22[25];    I2uud_1_bs2 = P22[28];    
+                I2uud_2_b2 = P22[26];    I2uud_2_bs2 = P22[29];    
                 
                 common_values.extend([I1udd_1_b2, I2uud_1_b2, I2uud_2_b2,
                                       I1udd_1_bs2, I2uud_1_bs2, I2uud_2_bs2
@@ -1013,7 +1023,9 @@ class RSDMultipolesPowerSpectrumCalculator:
             model (str): Model name ('EFT', 'TNS', 'FOLPSD').
         """
         self.model = model
-        
+        self._printed_model_damping_pk = False
+        #self._printed_model_damping_bk = False
+
     def set_bias_scheme(self, pars, bias_scheme="folps"):
         """Sets the nuisance parameters based on the selected bias scheme."""
         if bias_scheme in ["folps", "pat", "mcdonald"]:
@@ -1061,11 +1073,9 @@ class RSDMultipolesPowerSpectrumCalculator:
     def get_eft_pkmu(self, kev, mu, pars, table, damping='lor'):
         """Calculate the EFT galaxy power spectrum in redshift space."""
         (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4, ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) = pars
-        
-        #modificar esta cosa, esta mal puesta
-        Winfty_all=True       #change to False for VDG and no analytical marginalization
-        
-        
+
+        Winfty_all = True  # change to False for VDG and no analytical marginalization
+
         if A_full_status:
             (pkl, Fkoverf0, Ploop_dd, Ploop_dt, Ploop_tt, Pb1b2, Pb1bs2, Pb22, Pb2bs2,
              Pb2s2, sigma23pkl, Pb2t, Pbs2t, I1udd_1, I2uud_1, I2uud_2, I3uuu_2, I3uuu_3,
@@ -1079,12 +1089,7 @@ class RSDMultipolesPowerSpectrumCalculator:
              I2uudd_1D, I2uudd_2D, I3uuud_2D, I3uuud_3D, I4uuuu_2D, I4uuuu_3D, I4uuuu_4D, 
              I3uuud_1B, I4uuuu_1B, 
              sigma2w, *_, f0) = table
-            
-        #print(I3uuud_1B.shape)
-        #print(I3uuud_1B)
-        #print("==")
-        #print(I3uuud_2D.shape)
-        
+
         fk = Fkoverf0 * f0
         Pdt_L = pkl * Fkoverf0
         Ptt_L = pkl * Fkoverf0**2
@@ -1102,10 +1107,10 @@ class RSDMultipolesPowerSpectrumCalculator:
         def Af(mu, f0):
             return (f0 * mu**2 * I1udd_1 + f0**2 * (mu**2 * I2uud_1 + mu**4 * I2uud_2)
                     + f0**3 * (mu**4 * I3uuu_2 + mu**6 * I3uuu_3))
-        
+
         def Af_b2(mu, f0):
             return (f0*mu**2 * I1udd_1_b2 +  f0**2 * (mu**2 * I2uud_1_b2 +  mu**4 * I2uud_2_b2) )
-    
+
         def Af_bs2(mu, f0):
             return (f0*mu**2 * I1udd_1_bs2 +  f0**2 * (mu**2 * I2uud_1_bs2 +  mu**4 * I2uud_2_bs2) )
 
@@ -1116,7 +1121,7 @@ class RSDMultipolesPowerSpectrumCalculator:
 
         def ATNS(mu, b1):
             return b1**3 * Af(mu, f0 / b1)
-        
+
         def ATNS_b2_bs2(mu, b1, b2, bs2):
             return b1**3 * Af_b2(mu, f0/b1) * b2/(2*b1) +  b1**3 * Af_bs2(mu, f0/b1) * bs2/(2*b1)
 
@@ -1130,15 +1135,13 @@ class RSDMultipolesPowerSpectrumCalculator:
                 return -((kev * mu * f0)**2 * sigma2w * (b1**2 * pkl + 2 * b1 * f0 * mu**2 * Pdt_L + f0**2 * mu**4 * Ptt_L))
 
         def PloopSPTs(mu, b1, b2, bs2, b3nl):
-        
             if A_full_status:
                 return (
                         PddXloop(b1, b2, bs2, b3nl) + 2*f0*mu**2 * PdtXloop(b1, b2, bs2, b3nl)
                         + mu**4 * f0**2 * PttXloop(b1, b2, bs2, b3nl) + ATNS(mu, b1) + DRSD(mu, b1)
                         + GTNS(mu, b1) + ATNS_b2_bs2(mu, b1, b2, bs2)
                 )
-        
-            else: 
+            else:
                 return (
                     PddXloop(b1, b2, bs2, b3nl) + 2*f0*mu**2 * PdtXloop(b1, b2, bs2, b3nl)
                     + mu**4 * f0**2 * PttXloop(b1, b2, bs2, b3nl) + ATNS(mu, b1) + DRSD(mu, b1)
@@ -1156,7 +1159,7 @@ class RSDMultipolesPowerSpectrumCalculator:
 
         def Pshot(mu, alphashot0, alphashot2, PshotP):
             return PshotP * (alphashot0 + alphashot2 * (kev * mu)**2)
-        
+
         def Winfty(mu, X_FoG_p):
             lambda2= (f0*kev*mu*X_FoG_p)**2
             exp = - lambda2 * sigma2w /(1+lambda2)
@@ -1174,22 +1177,58 @@ class RSDMultipolesPowerSpectrumCalculator:
             x2 = lambda2 * sigma2w
             W   = 1.0/(1.0+x2)
             return W 
-        
-        if damping==None: 
-            W=1  # EFT if keeps DeltaP
-        elif damping=='exp':
-            W=Wexp(mu, X_FoG_p)
-        elif damping=='lor':
-            W=Wlorentz(mu, X_FoG_p)
-        elif damping=='vdg':
-            W=Winfty(mu, X_FoG_p)
-        
-        PK = W*PloopSPTs(mu, b1, b2, bs2, b3nl)  + Pshot(mu, alphashot0, alphashot2, PshotP)
 
-        if Winfty_all==False:
+        # --- Model self.model ---
+        if not getattr(self, '_printed_model_damping_pk', False):
+            print(f"[FOLPS] Model Pk: {self.model}, Damping: {damping}")
+            self._printed_model_damping_pk = True
+        if self.model == "EFT":
+            W = 1
+        elif self.model == "TNS":
+            if not remove_DeltaP_status:
+                raise RuntimeError("[FOLPS] To use the TNS model, you must set remove_DeltaP_status=True in MatrixCalculator.")
+            # TNS allows damping
+            if damping is None:
+                W = 1
+            elif damping == 'exp':
+                W = Wexp(mu, X_FoG_p)
+            elif damping == 'lor':
+                W = Wlorentz(mu, X_FoG_p)
+            elif damping == 'vdg':
+                W = Winfty(mu, X_FoG_p)
+            else:
+                W = 1
+        elif self.model == "FOLPSD":
+            if damping is None:
+                print("[FOLPS] For FOLPSD you must specify a damping ('exp', 'lor', 'vdg'). Default: 'lor'.")
+                damping = 'lor'
+            if damping == 'exp':
+                W = Wexp(mu, X_FoG_p)
+            elif damping == 'lor':
+                W = Wlorentz(mu, X_FoG_p)
+            elif damping == 'vdg':
+                W = Winfty(mu, X_FoG_p)
+            else:
+                W = 1
+        else:
+            # Default: keep previous logic for unknown models
+            if damping is None:
+                W = 1
+            elif damping == 'exp':
+                W = Wexp(mu, X_FoG_p)
+            elif damping == 'lor':
+                W = Wlorentz(mu, X_FoG_p)
+            elif damping == 'vdg':
+                W = Winfty(mu, X_FoG_p)
+            else:
+                W = 1
+
+        PK = W * PloopSPTs(mu, b1, b2, bs2, b3nl) + Pshot(mu, alphashot0, alphashot2, PshotP)
+
+        if Winfty_all == False:
             W = 1.0
-                
-        return PK + W * ( Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, b1, ctilde) )
+
+        return PK + W * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, b1, ctilde))
 
     def get_rsd_pkmu(self, k, mu, pars, table, table_now, IR_resummation, damping='lor'):
         """Return redshift space P(k, mu) given input tables."""
@@ -1252,18 +1291,20 @@ class RSDMultipolesPowerSpectrumCalculator:
 
 
 class BispectrumCalculator:
-    def __init__(self, basis='sugiyama'):
+    def __init__(self, basis='sugiyama', model='EFT'):
         """
         basis : str
             'sugiyama' or 'scoccimarro' (currently only 'sugiyama' is implemented)
+        model : str
+            'EFT', 'TNS', or 'FOLPSD'.
         """
         self.basis = basis.lower()
         if self.basis not in ['sugiyama', 'scoccimarro']:
             raise ValueError("basis must be 'sugiyama' or 'scoccimarro'.")
-            
-            
-    def pklIR_f(self, k,pklIRT):
-        return np.interp(k, pklIRT[0], pklIRT[1])
+        self.model = model
+        self._printed_model_damping_bk = False        
+    #def pklIR_f(self, k,pklIRT):
+    #    return np.interp(k, pklIRT[0], pklIRT[1])
 
             
     #GL pairs [[x1,w1],[x2,w2],....
@@ -1334,7 +1375,8 @@ class BispectrumCalculator:
         Qij = 2 * Z2
         return Qij
 
-    def bispectrum(self, k1, k2, x12, mu1, phi, f, f0, sigma2v, bpars, qpar, qperp, pk_in, damping = 'lor'):
+    def bispectrum(self, k1, k2, x12, mu1, phi, f, sigma2v, Sigma2, deltaSigma2,
+                   bpars, qpar, qperp, k_pkl_pklnw, damping = 'lor'):
         b1, b2, bs, c1, c2, Bshot, Pshot, X_FoG_b = bpars
 
         cosphi = np.cos(phi)
@@ -1345,9 +1387,29 @@ class BispectrumCalculator:
         Q13 = self.Qij(k1AP, k3AP, x31AP, mu1AP, mu3AP, f, bpars)
         Q23 = self.Qij(k2AP, k2AP, x23AP, mu2AP, mu3AP, f, bpars)
 
-        pk1 = self.pklIR_f(k1AP, pk_in)
-        pk2 = self.pklIR_f(k2AP, pk_in)
-        pk3 = self.pklIR_f(k3AP, pk_in)
+        
+        pk1   = np.interp(k1AP, k_pkl_pklnw[0], k_pkl_pklnw[1])
+        pk1nw = np.interp(k1AP, k_pkl_pklnw[0], k_pkl_pklnw[2])
+        pk2   = np.interp(k2AP, k_pkl_pklnw[0], k_pkl_pklnw[1])
+        pk2nw = np.interp(k2AP, k_pkl_pklnw[0], k_pkl_pklnw[2])
+        pk3   = np.interp(k3AP, k_pkl_pklnw[0], k_pkl_pklnw[1])
+        pk3nw = np.interp(k3AP, k_pkl_pklnw[0], k_pkl_pklnw[2])
+
+
+        e1IR = (1 + f*mu1AP**2 *(2 + f))*Sigma2 + (f*mu1AP)**2 * (mu1AP**2 - 1)* deltaSigma2
+        e2IR = (1 + f*mu2AP**2 *(2 + f))*Sigma2 + (f*mu2AP)**2 * (mu2AP**2 - 1)* deltaSigma2
+        e3IR = (1 + f*mu3AP**2 *(2 + f))*Sigma2 + (f*mu3AP)**2 * (mu3AP**2 - 1)* deltaSigma2
+
+        pkIR1= pk1nw + (pk1-pk1nw)*np.exp(-e1IR*k1AP**2)
+        pkIR2= pk2nw + (pk2-pk2nw)*np.exp(-e2IR*k2AP**2)
+        pkIR3= pk3nw + (pk3-pk3nw)*np.exp(-e3IR*k3AP**2)
+
+
+
+
+        #pk1 = self.pklIR_f(k1AP, pk_in)
+        #pk2 = self.pklIR_f(k2AP, pk_in)
+        #pk3 = self.pklIR_f(k3AP, pk_in)
 
         f1 = f2 = f3 = f
         Z1_1 = b1 + f1 * mu1AP**2
@@ -1358,29 +1420,59 @@ class BispectrumCalculator:
         Z1eft2 = Z1_2 - (c1 * mu2AP**2 + c2 * mu2AP**4) * k2AP**2
         Z1eft3 = Z1_3 - (c1 * mu3AP**2 + c2 * mu3AP**4) * k3AP**2
 
-        B12 = Q12 * Z1eft1 * pk1 * Z1eft2 * pk2
-        B13 = Q13 * Z1eft1 * pk1 * Z1eft3 * pk3
-        B23 = Q23 * Z1eft3 * pk2 * Z1eft3 * pk3
+        B12 = Q12 * Z1eft1*pkIR1 * Z1eft2*pkIR2;
+        B13 = Q13 * Z1eft1*pkIR1 * Z1eft3*pkIR3;
+        B23 = Q23 * Z1eft3*pkIR2 * Z1eft3*pkIR3;
 
         l2 = (k1AP * mu1AP)**2 + (k2AP * mu2AP)**2 + (k3AP * mu3AP)**2
-        l2 = 0.5 * l2 * (f0 * X_FoG_b)**2
+        l2 = 0.5 * l2 * (f * X_FoG_b)**2
 
         Winfty = np.exp(- l2 * sigma2v / (1 + l2)) / np.sqrt((1 + l2)**3)
         Wlor = 1.0 / (1.0 + l2 * sigma2v)
 
-        #damping = 'lor'
-        if damping is None:
+
+        if not getattr(self, '_printed_model_damping_bk', False):
+            print(f"[FOLPS] Model Bk: {self.model}, Damping: {damping}")
+            self._printed_model_damping_bk = True
+        # Model logic for W
+        if self.model == "EFT":
             W = 1
-        elif damping == 'lor':
-            W = Wlor
-        elif damping == 'vdg':
-            W = Winfty
+        elif self.model == "TNS":
+            global remove_DeltaP_status
+            if remove_DeltaP_status is not True:
+                raise RuntimeError("[FOLPS] To use the TNS model, you must set remove_DeltaP_status=True in MatrixCalculator.")
+            # TNS allows damping
+            elif damping == 'lor':
+                W = Wlor
+            elif damping == 'vdg':
+                W = Winfty
+            else:
+                W = Wlor
+        elif self.model == "FOLPSD":
+            if damping not in ['lor', 'vdg']:
+                print("[FOLPS] For FOLPSD you must specify a valid damping ('lor', 'vdg'). Default: 'lor'.")
+                damping = 'lor'
+            elif damping == 'lor':
+                W = Wlor
+            elif damping == 'vdg':
+                W = Winfty
+            else:
+                W = Wlor
+        else:
+            # Default: keep previous logic for unknown models
+            if damping == 'lor':
+                W = Wlor
+            elif damping == 'vdg':
+                W = Winfty
+            else:
+                W = Wlor
+
         
         ## Noise 
         # To match eq.3.14 of 2110.10161, one makes (1+Pshot) -> (1+Pshot)/bar-n; Bshot -> Bshot/bar-n
-        shot = (b1 * Bshot + 2.0 * (1 + Pshot) * f1 * mu1AP**2) * Z1eft1 * pk1 \
-             + (b1 * Bshot + 2.0 * (1 + Pshot) * f2 * mu2AP**2) * Z1eft2 * pk2 \
-             + (b1 * Bshot + 2.0 * (1 + Pshot) * f3 * mu3AP**2) * Z1eft3 * pk3 \
+        shot = (b1 * Bshot + 2.0 * (1 + Pshot) * f1 * mu1AP**2) * Z1eft1 * pkIR1 \
+             + (b1 * Bshot + 2.0 * (1 + Pshot) * f2 * mu2AP**2) * Z1eft2 * pkIR2 \
+             + (b1 * Bshot + 2.0 * (1 + Pshot) * f3 * mu3AP**2) * Z1eft3 * pkIR3 \
              + (1 + Pshot)**2
 
         bispectrum = W * (B12 + B13 + B23) + shot
@@ -1389,7 +1481,26 @@ class BispectrumCalculator:
 
         return bispectrum
 
-    def Bisp_Sugiyama(self, f, f0, bpars, pk_input, z_pk,
+    
+    def sigmas(self, kT,pklT):
+
+        k_BAO = 1/104
+        kS =0.4
+
+        sigma2v_  = simpson(pklT, x=kT) / (6 * np.pi**2)
+        sigma2v_ *= 1.05  #correction due to k cut
+
+        pklT_=pklT[kT<=0.4].copy()
+        kT_=kT[kT<=0.4].copy()
+    
+        Sigma2_ = 1/(6 * np.pi**2)*simpson(pklT_*(1 - special.spherical_jn(0, kT_/k_BAO) 
+                                                + 2*special.spherical_jn(2, kT_/k_BAO)), x=kT_)
+        deltaSigma2_ = 1/(2 * np.pi**2)*simpson(pklT*special.spherical_jn(2, kT/k_BAO), x=kT)
+
+        return sigma2v_, Sigma2_, deltaSigma2_
+
+        
+    def Bisp_Sugiyama(self, f, bpars, k_pkl_pklnw, z_pk,
                       k1k2pairs, qpar, qperp, precision=[4, 5, 5], damping = 'lor'):
 
         #OmM, h = bisp_cosmo_params
@@ -1400,9 +1511,10 @@ class BispectrumCalculator:
         #    qpar = Hubble(Omfid, z_pk) / Hubble(OmM, z_pk)
 
         #f = f0_function(z_pk, OmM)
-
-        sigma2v_ = integrate.simps(pk_input[1], pk_input[0]) / (6 * np.pi**2)
-        sigma2v_ *= 1.05 #correction due to k cut
+        kT=k_pkl_pklnw[0]
+        pklT=k_pkl_pklnw[1]
+        sigma2v_, Sigma2_, deltaSigma2_ = self.sigmas(kT, pklT)
+        
         
         # tables for GL pairs [phi,mu,x] [[x1,w1],[x2,w2],....]
         tablesGL = self.tablesGL_f(precision)
@@ -1413,12 +1525,11 @@ class BispectrumCalculator:
 
         for ii in range(size):
             k1, k2 = k1k2pairs[ii]
-            B000[ii], B202[ii] = self.Sugiyama_B000_B202(
-                k1, k2, f, f0, sigma2v_, bpars, qpar, qperp, tablesGL, pk_input, damping)
+            B000[ii], B202[ii] = self.Sugiyama_B000_B202(k1, k2, f, sigma2v_, Sigma2_, deltaSigma2_, bpars, qpar, qperp, tablesGL, k_pkl_pklnw, damping = damping)
 
         return B000, B202
 
-    def Sugiyama_B000_B202(self, k1, k2, f, f0, sigma2v, bpars, qpar, qperp, tablesGL, pk_in, damping = 'lor'):
+    def Sugiyama_B000_B202(self, k1, k2, f, sigma2v, Sigma2, deltaSigma2, bpars, qpar, qperp, tablesGL, k_pkl_pklnw, damping = 'lor'):
         phiGL, xGL, muGL = tablesGL
 
         phi_values, phi_weights = phiGL[:, 0], phiGL[:, 1]
@@ -1432,7 +1543,7 @@ class BispectrumCalculator:
         x_mesh, mu_mesh, phi_mesh = np.meshgrid(x_values, mu_values, phi_values, indexing='ij')
 
         bisp = self.bispectrum(k1, k2, x_mesh, mu_mesh, phi_mesh,
-                               f, f0, sigma2v, bpars, qpar, qperp, pk_in, damping)
+                               f, sigma2v, Sigma2, deltaSigma2, bpars, qpar, qperp, k_pkl_pklnw, damping)
 
         int_phi = 2 * np.sum(bisp * phi_weights, axis=2)
         int_mu_B000 = np.sum(int_phi * mu_weights, axis=1)
@@ -1446,34 +1557,4 @@ class BispectrumCalculator:
         B202 = int_all_B202 * normB202
 
         return B000, B202
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
-
-
-# In[ ]:
-
-
-
 

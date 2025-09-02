@@ -1,6 +1,8 @@
 import warnings
+import warnings
 from jax import numpy as jnp
 import numpy as np
+from scipy import special
 
 import interpax
 
@@ -622,3 +624,124 @@ def get_pknow(k, pk, h):
     PNWkTot = jnp.concatenate([PNWk1, PNWk2, PNWk3])
 
     return(k, PNWkTot)
+
+
+
+def get_linear_ir(k, pk, h, pknow=None, fullrange=False, kmin=0.01, kmax=0.5, rbao=104, saveout=False):
+    """
+    Calculates the infrared resummation of the linear power spectrum.
+
+    Parameters:
+    k, pk : array_like
+        Wave numbers and power spectrum values.
+    h : float
+        Hubble parameter, H0/100.
+    pknow : array_like, optional
+        Pre-computed non-wiggle power spectrum.
+    fullrange : bool, optional
+        If True, returns the full range of k and pk_IRs.
+    kmin, kmax : float, optional
+        Minimum and maximum k values for filtering.
+    rbao : float, optional
+        BAO radius for damping.
+    saveout : bool, optional
+        If True, saves the output to a file.
+
+    Returns:
+    tuple
+        Filtered or full arrays of k and pk_IRs.
+    """
+    if pknow is None:
+        if h is None:
+            raise ValueError("Argument 'h' is required when 'pknow' is None")
+        kT, pk_nw = get_pknow(k, pk, h)
+    else:
+        pk_nw = pknow
+    
+    p = jnp.geomspace(10**(-6), 0.4, num=100)
+    PSL_NW = interp(p, kT, pk_nw)
+    sigma2_NW = 1 / (6 * jnp.pi**2) * simpson(PSL_NW * (1 - special.spherical_jn(0, p * rbao) + 2 * special.spherical_jn(2, p * rbao)), x=p)
+    pk_IRs = pk_nw + jnp.exp(-kT**2 * sigma2_NW)*(pk - pk_nw)
+    
+    mask = (kT >= kmin) & (kT <= kmax) & (jnp.arange(len(kT)) % 2 == 0)
+    newkT = kT[mask]
+    newpk = pk_IRs[mask]
+    
+    output = (kT, pk_IRs) if fullrange else (newkT, newpk)
+                             
+    if saveout:
+        jnp.savetxt('pk_IR.txt', jnp.array(output).T, delimiter=' ')
+
+    return output
+
+
+
+def get_linear_ir_ini(k, pkl, pklnw, h=0.6711, k_BAO=1.0 / 104.):
+    """
+    Computes the initial infrared-resummed linear power spectrum using a fixed BAO scale.
+
+    Parameters
+    ----------
+    k : array_like
+        Wavenumbers [h/Mpc].
+    pkl : array_like
+        Linear power spectrum with wiggles.
+    pklnw : array_like
+        Linear no-wiggle (smooth) power spectrum.
+    h : float, optional
+        Hubble parameter, H0/100. Default is 0.6711.
+    k_BAO : float, optional
+        Inverse of the BAO scale in [1/Mpc]. Default is 1.0 / 104.
+
+    Returns
+    -------
+    tuple of ndarray
+        Tuple containing:
+            - k : Wavenumbers [h/Mpc].
+            - pkl_IR : Infrared-resummed power spectrum.
+    """
+    # Integration range (geometric spacing)
+    p = np.geomspace(1e-6, 0.4, num=100)
+
+    # Interpolate no-wiggle spectrum on integration grid
+    pk_nw_interp = interp(p, k, pklnw)
+
+    # Compute damping factor Sigma^2
+    j0 = special.spherical_jn(0, p / k_BAO)
+    j2 = special.spherical_jn(2, p / k_BAO)
+    integrand = pk_nw_interp * (1 - j0 + 2 * j2)
+    sigma2 = 1 / (6 * jnp.pi**2) * simpson(integrand, x=p)
+
+    # Apply IR resummation damping
+    pkl_IR = pklnw + jnp.exp(-k**2 * sigma2) * (pkl - pklnw)
+
+    return k, pkl_IR
+
+
+#AP tools
+def Hubble(Om, z_ev):
+    return jnp.sqrt(Om * (1 + z_ev)**3 + (1 - Om))
+
+def DA(Om, z_ev, nsteps=1000):
+    z_grid = jnp.linspace(0.0, z_ev, nsteps)
+    dz = z_ev / (nsteps - 1)
+    integrand = 1.0 / Hubble(Om, z_grid)
+    r = jnp.trapezoid(integrand, dx=dz)
+    return r / (1.0 + z_ev)
+
+def qpar_qperp(Omega_fid, Omega_m, z_pk, cosmo=None):
+     #check this eqs for CLASS  (see script in external disk)
+    if cosmo is not None:
+        DA_fid = DA(Omega_fid, z_pk)
+        H_fid = Hubble(Omega_fid, z_pk)
+        DA_m = cosmo.angular_distance(z_pk)
+        H_m = cosmo.Hubble(z_pk)
+    else:
+        DA_fid = DA(Omega_fid, z_pk)
+        DA_m = DA(Omega_m, z_pk)
+        H_fid = Hubble(Omega_fid, z_pk)
+        H_m = Hubble(Omega_m, z_pk)
+
+    qperp = DA_m / DA_fid
+    qpar = H_fid / H_m
+    return qpar, qperp

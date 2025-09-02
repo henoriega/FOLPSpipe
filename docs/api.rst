@@ -1,11 +1,16 @@
 API Reference
 =============
 
-.. automodule:: geofptax.kernels
+Main Module
+-----------
+.. automodule:: folps.folps
    :members:
+   :undoc-members:
+   :show-inheritance:
 
-.. automodule:: geofptax.constants
+Auxiliary Tools
+---------------
+.. automodule:: folps.tools
    :members:
-
-.. automodule:: geofptax.ckernels
-   :members:
+   :undoc-members:
+   :show-inheritance:
