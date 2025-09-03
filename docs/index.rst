@@ -20,6 +20,11 @@ Clone the repository and navigate to the main folder:
    cd FOLPSpipe
    pip install -r requirements.txt
 
+Getting Started
+===============
+
+After installation, you can start using FOLPSpipe in your Python scripts or Jupyter notebooks. For detailed API documentation, see the `api` section. Example notebooks and scripts are provided in the repository.
+
 Basic Usage
 ===========
 

@@ -19,6 +19,9 @@ extensions = [
 # HTML theme
 html_theme = 'sphinx_rtd_theme'
 
+# Set documentation language to English
+language = 'en'
+
 # Paths
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
