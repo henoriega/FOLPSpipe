@@ -1680,7 +1680,7 @@ def PEFTs_derivatives(k, mu, pkl, PshotP):
 
 
 
-def get_rsd_pkell_marg_derivatives(
+def get_rsd_pkell_marg_derivatives_new(
     kobs, qpar, qper, pars, table, table_now,
     bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True,
     model='EFT'
@@ -1725,13 +1725,6 @@ def get_rsd_pkell_marg_derivatives(
         PIRs_alphashot0 = exp_term * PEFTs_alphashot0 + exp_term_inv * PEFTs_alphashot0_NW
         PIRs_alphashot2 = exp_term * PEFTs_alphashot2 + exp_term_inv * PEFTs_alphashot2_NW
 
-        #print("======= mu =======")
-        #print(muap)
-        #print("======= end: mu =======")
-            
-        #print("========= results ==========")
-        #print(PIRs_alpha0, PIRs_alpha2, PIRs_alpha4, PIRs_alphashot0, PIRs_alphashot2)
-        #print("======= end: mu =======")
             
         return (PIRs_alpha0, PIRs_alpha2, PIRs_alpha4, PIRs_alphashot0, PIRs_alphashot2)
 
@@ -1740,8 +1733,9 @@ def get_rsd_pkell_marg_derivatives(
 
     def ModelPkl_derivatives(table, table_now, ell):
         factor = (2*ell+1)/2
+        leg_poly = scipy.special.eval_legendre(ell, xGL)
         result = 1/(qper**2 * qpar) * sum(
-            factor * wGL[ii] * np.array(get_rsd_pkmu_derivatives(kobs, xGL[ii], pars, table, table_now, IR_resummation, damping)) * scipy.special.eval_legendre(ell, xGL[ii])
+            factor * wGL[ii] * np.array(get_rsd_pkmu_derivatives(kobs, xGL[ii], pars, table, table_now, IR_resummation, damping)) * leg_poly[ii]
             for ii in range(Nx)
         )
         return result
