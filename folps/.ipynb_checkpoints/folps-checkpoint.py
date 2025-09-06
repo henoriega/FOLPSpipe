@@ -1084,7 +1084,7 @@ class RSDMultipolesPowerSpectrumCalculator:
         """Calculate the EFT galaxy power spectrum in redshift space."""
         (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4, ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) = pars
 
-        Winfty_all = True  # change to False for VDG and no analytical marginalization
+        Winfty_all = False  # change to False for VDG and no analytical marginalization
 
         if A_full_status:
             (pkl, Fkoverf0, Ploop_dd, Ploop_dt, Ploop_tt, Pb1b2, Pb1bs2, Pb22, Pb2bs2,
@@ -1568,3 +1568,296 @@ class BispectrumCalculator:
 
         return B000, B202
 
+
+#Analytical marginalization....
+
+def get_rsd_pkell_marg_const(
+    kobs, qpar, qper, pars, table, table_now,
+    bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True,
+    model='EFT'
+    ):
+    """
+    Computes the multipoles of the RSD power spectrum marginalizing over EFT and stochastic parameters.
+    """
+    
+    multipoles = RSDMultipolesPowerSpectrumCalculator(model=model)
+
+    def get_rsd_pkmu_const(k, mu, pars, table, table_now, IR_resummation, damping):
+        # Apply bias scheme
+        pars = multipoles.set_bias_scheme(pars, bias_scheme=bias_scheme)
+        (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4,
+         ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) = pars
+
+        # Interpolate tables
+        table_interp = multipoles.interp_table(k, table, A_full_status)
+        table_now_interp = multipoles.interp_table(k, table_now, A_full_status)
+
+        # Set EFT and stochastic parameters to zero (marginalization)
+        alpha0 = alpha2 = alpha4 = alphashot0 = alphashot2 = 0.0
+
+        pars_const = (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4,
+                      ctilde, alphashot0, alphashot2, PshotP, X_FoG_p)
+
+        f0 = table_interp[-1]
+        fk = table_interp[1] * f0
+        pkl, pkl_now = table_interp[0], table_now_interp[0]
+        sigma2, delta_sigma2 = table_now_interp[-3], table_now_interp[-2]
+
+        # Total Sigma^2 for IR-resummation, see eq. 3.59 in arXiv:2208.02791
+        if IR_resummation:
+            sigma2t = (1 + f0 * mu**2 * (2 + f0)) * sigma2 + (f0 * mu)**2 * (mu**2 - 1) * delta_sigma2
+        else:
+            sigma2t = 0.0
+
+        # Compute pkmu
+        pkmu = (
+            (b1 + fk * mu**2)**2 * (pkl_now + np.exp(-k**2 * sigma2t) * (pkl - pkl_now) * (1 + k**2 * sigma2t))
+            + np.exp(-k**2 * sigma2t) * multipoles.get_eft_pkmu(k, mu, pars_const, table_interp, damping)
+            + (1 - np.exp(-k**2 * sigma2t)) * multipoles.get_eft_pkmu(k, mu, pars_const, table_now_interp, damping)
+        )
+        return pkmu
+
+    def get_rsd_pkell(
+        kobs, qpar, qper, pars, table, table_now,
+        bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True,
+        model='EFT'
+    ):
+        """
+        Computes the multipoles of the power spectrum.
+        """
+        pars = multipoles.set_bias_scheme(pars, bias_scheme=bias_scheme)
+
+        def weights_leggauss(nx, sym=False):
+            """Return weights for Gauss-Legendre integration."""
+            x, wx = np.polynomial.legendre.leggauss((1 + sym) * nx)
+            if sym:
+                x, wx = x[nx:], (wx[nx:] + wx[nx - 1::-1]) / 2.
+            return x, wx
+
+        muobs, wmu = weights_leggauss(nmu, sym=True)
+        wmu_arr = np.array([wmu * (2 * ell + 1) * legendre(ell)(muobs) for ell in ells])
+        jac = (qpar * qper**2)**(-3)
+        kap = multipoles.k_ap(kobs[:, None], muobs, qpar, qper)
+        muap = multipoles.mu_ap(muobs, qpar, qper)[None, :]
+
+        pkmu = jac * get_rsd_pkmu_const(kap, muap, pars, table, table_now, IR_resummation, damping)
+        pkell = np.sum(pkmu * wmu_arr[:, None, :], axis=-1)
+        return pkell
+
+    return get_rsd_pkell(
+        kobs, qpar, qper, pars, table, table_now,
+        bias_scheme=bias_scheme, damping=damping,
+        nmu=nmu, ells=ells, IR_resummation=IR_resummation,
+        model=model
+    )
+
+
+
+def PEFTs_derivatives(k, mu, pkl, PshotP):
+    """
+    Derivatives of PEFTs with respect to the EFT and stochastic parameters.
+    
+    Args:
+        k: wave-number coordinates of evaluation.
+        mu: cosine angle between the wave-vector ‘\vec{k}’ and the line-of-sight direction ‘\hat{n}’.
+        pkl: linear power spectrum.
+        PshotP: stochastic nuisance parameter.
+    Returns:
+        ∂P_EFTs/∂α_i with: α_i = {alpha0, alpha2, alpha4, alphashot0, alphashot2}
+    """
+    
+    k2 = k**2
+    k2mu2 = k2 * mu**2
+    k2mu4 = k2mu2 * mu**2
+
+    PEFTs_alpha0 = k2 * pkl
+    PEFTs_alpha2 = k2mu2 * pkl 
+    PEFTs_alpha4 = k2mu4 * pkl 
+    PEFTs_alphashot0 = PshotP
+    PEFTs_alphashot2 = k2mu2 * PshotP
+    
+    return (PEFTs_alpha0, PEFTs_alpha2, PEFTs_alpha4, PEFTs_alphashot0, PEFTs_alphashot2)
+
+
+
+def get_rsd_pkell_marg_derivatives(
+    kobs, qpar, qper, pars, table, table_now,
+    bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True,
+    model='EFT'
+    ):
+    """
+    Redshift space power spectrum multipoles 'derivatives': Pℓ,i=∂Pℓ/∂α_i 
+    (derivatives with respect to the EFT and stochastic parameters).
+    """
+    multipoles = RSDMultipolesPowerSpectrumCalculator(model=model)
+
+    def get_rsd_pkmu_derivatives(k, mu, pars, table, table_now, IR_resummation, damping):
+        pars = multipoles.set_bias_scheme(pars, bias_scheme=bias_scheme)
+        (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4,
+         ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) = pars
+
+        kap = multipoles.k_ap(k, mu, qpar, qper)
+        muap = multipoles.mu_ap(mu, qpar, qper)
+
+        table_interp = multipoles.interp_table(kap, table, A_full_status)
+        table_now_interp = multipoles.interp_table(kap, table_now, A_full_status)
+
+        f0 = table_interp[-1]
+        fk = table_interp[1] * f0
+        pkl, pkl_now = table_interp[0], table_now_interp[0]
+        sigma2, delta_sigma2 = table_now_interp[-3:-1]
+     
+        PEFTs_alpha0, PEFTs_alpha2, PEFTs_alpha4, PEFTs_alphashot0, PEFTs_alphashot2 = PEFTs_derivatives(kap, muap, pkl, PshotP)
+        PEFTs_alpha0_NW, PEFTs_alpha2_NW, PEFTs_alpha4_NW, PEFTs_alphashot0_NW, PEFTs_alphashot2_NW = PEFTs_derivatives(kap, muap, pkl_now, PshotP)
+        
+        if IR_resummation:
+            sigma2t = (1 + f0 * mu**2 * (2 + f0)) * sigma2 + (f0 * mu)**2 * (mu**2 - 1) * delta_sigma2
+        else:
+            sigma2t = 0.0    
+            
+        exp_term = np.exp(-kap**2 * sigma2t)
+        exp_term_inv = 1 - exp_term
+            
+        #computing PIRs_derivatives for EFT and stochastic parameters
+        PIRs_alpha0 = exp_term * PEFTs_alpha0 + exp_term_inv * PEFTs_alpha0_NW
+        PIRs_alpha2 = exp_term * PEFTs_alpha2 + exp_term_inv * PEFTs_alpha2_NW
+        PIRs_alpha4 = exp_term * PEFTs_alpha4 + exp_term_inv * PEFTs_alpha4_NW
+        PIRs_alphashot0 = exp_term * PEFTs_alphashot0 + exp_term_inv * PEFTs_alphashot0_NW
+        PIRs_alphashot2 = exp_term * PEFTs_alphashot2 + exp_term_inv * PEFTs_alphashot2_NW
+
+        #print("======= mu =======")
+        #print(muap)
+        #print("======= end: mu =======")
+            
+        #print("========= results ==========")
+        #print(PIRs_alpha0, PIRs_alpha2, PIRs_alpha4, PIRs_alphashot0, PIRs_alphashot2)
+        #print("======= end: mu =======")
+            
+        return (PIRs_alpha0, PIRs_alpha2, PIRs_alpha4, PIRs_alphashot0, PIRs_alphashot2)
+
+    Nx = nmu   
+    xGL, wGL = scipy.special.roots_legendre(Nx)
+
+    def ModelPkl_derivatives(table, table_now, ell):
+        factor = (2*ell+1)/2
+        result = 1/(qper**2 * qpar) * sum(
+            factor * wGL[ii] * np.array(get_rsd_pkmu_derivatives(kobs, xGL[ii], pars, table, table_now, IR_resummation, damping)) * scipy.special.eval_legendre(ell, xGL[ii])
+            for ii in range(Nx)
+        )
+        return result
+
+    return tuple(ModelPkl_derivatives(table, table_now, ell) for ell in ells)
+
+
+
+#Marginalization matrices
+def startProduct(A, B, invCov):
+    '''Computes: A @ InvCov @ B^{T}, where 'T' means transpose.
+    
+    Args:
+         A: first vector, array of the form 1 x n
+         B: second vector, array of the form 1 x n
+         invCov: inverse of covariance matrix, array of the form n x n
+    
+    Returns:
+         The result of: A @ InvCov @ B^{T}
+    '''
+    
+    return A @ invCov @ B.T
+
+
+def compute_L0(Pl_const, Pl_data, invCov, mu_prior = 0, sigma_prior = np.inf):
+    '''Computes the term L0 of the marginalized Likelihood.
+    
+    Args:
+         Pl_const: model multipoles for the constant part (Pℓ,const = Pℓ(α->0)), array of the form 1 x n
+         Pl_data: data multipoles, array of the form 1 x n 
+         invCov: inverse of covariance matrix, array of the form n x n
+         
+    Return:
+         Loglikelihood for the constant part of the model multipoles 
+    '''
+    
+    D_const = Pl_const - Pl_data
+    
+    L0 = -0.5 * startProduct(D_const, D_const, invCov)   
+    
+    # Adding prior to L0
+    if isinstance(sigma_prior, (int, float)):
+        mu_prior2 = np.dot(np.array(mu_prior), np.array(mu_prior))
+        L0 += -0.5 * (mu_prior2 / (sigma_prior ** 2) )
+    else:
+        mu_prior2 = np.dot(np.array(mu_prior), np.array(mu_prior))
+        sigma_prior2 = np.dot(np.array(sigma_prior), np.array(sigma_prior))
+        L0 += -0.5 * (mu_prior2 / sigma_prior2)
+    
+    return L0
+
+    
+def compute_L1i(Pl_i, Pl_const, Pl_data, invCov, mu_prior = 0, sigma_prior = np.inf):
+    '''Computes the term L1i of the marginalized Likelihood.
+    
+    Args:
+         Pl_i: array with the derivatives of the power spectrum multipoles with respect to 
+               the EFT and stochastic parameters, i.e., Pℓ,i=∂Pℓ/∂α_i , i = 1,..., ndim
+               array of the form ndim x n
+         Pl_const: model multipoles for the constant part (Pℓ,const = Pℓ(α->0)), array of the form 1 x n
+         Pl_data: data multipoles, array of the form 1 x n
+         invCov: inverse of covariance matrix, array of the form n x n
+    Return:
+         array for L1i
+    '''
+    
+    D_const = Pl_const - Pl_data  
+    
+    #ndim = len(Pl_i)
+    
+    #computing L1i
+    #L1i = np.zeros(ndim)
+    
+    #for ii in range(ndim):
+    #    term1 = startProduct(Pl_i[ii], D_const, invCov)
+    #    term2 = startProduct(D_const, Pl_i[ii], invCov)
+    #    L1i[ii] = -0.5 * (term1 + term2)
+    
+    L1i = - startProduct(Pl_i, D_const, invCov)
+    
+    # Adding prior to L1i
+    if isinstance(sigma_prior, (int, float)):
+        L1i += np.array(mu_prior) / (sigma_prior ** 2)
+    else:
+        L1i += np.array(mu_prior) / np.array(sigma_prior) ** 2
+    
+    return L1i
+
+
+def compute_L2ij(Pl_i, invCov, sigma_prior = np.inf):
+    '''Computes the term L2ij of the marginalized Likelihood.
+    
+    Args:
+         Pl_i: array with the derivatives of the power spectrum multipoles with respect to 
+               the EFT and stochastic parameters, i.e., Pℓ,i=∂Pℓ/∂α_i , i = 1,..., ndim
+               array of the form ndim x n
+         invCov: inverse of covariance matrix, array of the form n x n
+    Return:
+         array for L2ij
+    '''
+    
+    #ndim = len(Pl_i)
+    
+    #Computing L2ij
+    #L2ij = np.zeros((ndim, ndim))
+    
+    #for ii in range (ndim):
+        #for jj in range (ndim):
+            #L2ij[ii, jj] = startProduct(Pl_i[ii], Pl_i[jj], invCov)
+    
+    L2ij = startProduct(Pl_i, Pl_i, invCov)
+            
+    # Adding prior variances to L2ij
+    if isinstance(sigma_prior, (int, float)):
+        L2ij += 1 / (sigma_prior ** 2)
+    else:
+        L2ij += np.diag(1 / np.array(sigma_prior) ** 2)
+            
+    return L2ij 

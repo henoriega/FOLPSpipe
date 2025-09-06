@@ -16,7 +16,7 @@ setup(
       name=package_basename,
       version=version,
       author='Hernan E. Noriega',
-      author_email='',
+      author_email='henoriega@icf.unam.mx',
       description='FOLPS code (includes JAX)',
       long_description=long_description,
       long_description_content_type='text/markdown',

@@ -1084,7 +1084,7 @@ class RSDMultipolesPowerSpectrumCalculator:
         """Calculate the EFT galaxy power spectrum in redshift space."""
         (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4, ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) = pars
 
-        Winfty_all = True  # change to False for VDG and no analytical marginalization
+        Winfty_all = False  # change to False for VDG and no analytical marginalization
 
         if A_full_status:
             (pkl, Fkoverf0, Ploop_dd, Ploop_dt, Ploop_tt, Pb1b2, Pb1bs2, Pb22, Pb2bs2,
