@@ -38,11 +38,20 @@ class BackendManager:
         """Dynamically configures the backend between NumPy and JAX."""
         if preferred_backend == 'jax':
             try:
-                import jax  # type: ignore
-                if any(device.device_kind in ["Gpu", "Metal"] for device in jax.devices()):
-                    print("✅ GPU detected. Using JAX with GPU.")
+                # import jax  # type: ignore
+                # if any(device.device_kind in ["Gpu", "Metal"] for device in jax.devices()):
+                #     print("✅ GPU detected. Using JAX with GPU.")
+                # else:
+                #     print("⚠️ No GPU found. Using JAX with CPU.")
+                import jax
+                devices = jax.devices()
+                backend = jax.default_backend()
+                if backend == "gpu":
+                    print(f"✅ GPU detected. Using JAX with GPU. Devices: {devices}")
+                elif backend == "cpu":
+                    print(f"⚠️ JAX is using CPU. Devices: {devices}")
                 else:
-                    print("⚠️ No GPU found. Using JAX with CPU.")
+                    print(f"ℹ️ JAX backend: {backend}. Devices: {devices}")
 
                 from jax import numpy as np
                 try:
