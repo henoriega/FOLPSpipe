@@ -1,1 +1,4 @@
 folps/mike_data_tools.py
+*.egg-info
+*.DS_Store
+
