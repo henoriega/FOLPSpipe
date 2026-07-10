@@ -1341,6 +1341,45 @@ class NonLinearPowerSpectrumCalculator:
         return {"k": self.kTout,"pk_l": pk_l,"pk_l_NW": pk_l_NW,"f_k": fk,"f0": self.f0}
 
 
+def fog_damping(*kmu_X, f=1., sigma2v=1., damping='lor'):
+    r"""
+    Finger-of-God damping kernel W, following jaxpower's pt.py convention.
+
+    Parameters
+    ----------
+    kmu_X : tuples
+        One ``(k * mu, X_FoG)`` pair per power spectrum leg: two (identical) pairs
+        for the auto power spectrum, three for the bispectrum.
+    f : float
+        Growth rate :math:`f_0` (each ``k * mu`` is multiplied by ``f``).
+    sigma2v : float
+        Velocity dispersion :math:`\sigma_v^2`.
+    damping : {None, 'exp', 'lor', 'vdg'}
+        ``None`` returns 1 (no damping).
+
+    Notes
+    -----
+    With :math:`\lambda_X^2 = \frac{f^2}{2} \sum_i (k_i \mu_i X_i)^2` and
+    :math:`\lambda^2 = \frac{f^2}{2} \sum_i (k_i \mu_i)^2`:
+    'exp' returns :math:`e^{-\lambda_X^2 \sigma_v^2}`, 'lor' returns
+    :math:`1 / (1 + \lambda_X^2 \sigma_v^2)`, and 'vdg' returns
+    :math:`e^{-\lambda^2 \sigma_v^2 / (1 + \lambda_X^2)} / (1 + \lambda_X^2)^{n - 3/2}`
+    with :math:`n` the number of legs (1/2 for the power spectrum, 3/2 for the bispectrum).
+    """
+    if damping is None:
+        return 1.
+    lX2 = 0.5 * f**2 * sum((kmu * X)**2 for kmu, X in kmu_X)
+    if damping == 'lor':
+        return 1. / (1. + lX2 * sigma2v)
+    if damping == 'exp':
+        return np.exp(-lX2 * sigma2v)
+    if damping == 'vdg':
+        l2 = 0.5 * f**2 * sum(kmu**2 for kmu, _ in kmu_X)
+        denom = 1. + lX2
+        return np.exp(-l2 * sigma2v / denom) / denom**(len(kmu_X) - 1.5)
+    raise ValueError(f"damping must be None, 'exp', 'lor' or 'vdg', got {damping!r}")
+
+
 class RSDMultipolesPowerSpectrumCalculator:
     """
     A class to calculate the redshift space power spectrum multipoles with flexible bias schemes.
@@ -1548,25 +1587,6 @@ class RSDMultipolesPowerSpectrumCalculator:
         def Pshot(mu, alphashot0, alphashot2, PshotP):
             return PshotP * (alphashot0 + alphashot2 * (kev * mu)**2)
 
-        def Winfty(mu, X_FoG_p):
-            c2= (f0*kev*mu)**2
-            X2=X_FoG_p**2
-            exp = - c2 * sigma2w /(1+c2*X2)
-            W   =np.exp(exp) / np.sqrt(1+c2*X2)
-            return W 
-
-        def Wexp(mu, X_FoG_p):
-            l2= (f0*kev*mu*X_FoG_p)**2
-            exp = - l2 * sigma2w
-            W   =np.exp(exp)
-            return W  
-
-        def Wlorentz(mu, X_FoG_p):
-            l2= (f0*kev*mu*X_FoG_p)**2
-            x2 = l2 * sigma2w
-            W   = 1.0/(1.0+x2)
-            return W 
-
         # --- Model self.model ---
         if not getattr(self, '_printed_model_damping_pk', False):
             if self.model == "EFT" and damping is not None:
@@ -1578,44 +1598,15 @@ class RSDMultipolesPowerSpectrumCalculator:
             self._printed_model_damping_pk = True
             
         if self.model == "EFT":
-            W = 1
+            damping = None
         elif self.model == "TNS":
             if not use_TNS_model_status:
                 raise RuntimeError("[FOLPS] To use the TNS model, you must set use_TNS_model=True in MatrixCalculator.")
-            # TNS allows damping
-            if damping is None:
-                W = 1
-            elif damping == 'exp':
-                W = Wexp(mu, X_FoG_p)
-            elif damping == 'lor':
-                W = Wlorentz(mu, X_FoG_p)
-            elif damping == 'vdg':
-                W = Winfty(mu, X_FoG_p)
-            else:
-                W = 1
         elif self.model == "FOLPSD":
             if damping is None:
                 print("[FOLPS] For FOLPSD you must specify a damping ('exp', 'lor', 'vdg'). Default: 'lor'.")
                 damping = 'lor'
-            if damping == 'exp':
-                W = Wexp(mu, X_FoG_p)
-            elif damping == 'lor':
-                W = Wlorentz(mu, X_FoG_p)
-            elif damping == 'vdg':
-                W = Winfty(mu, X_FoG_p)
-            else:
-                W = 1
-        else:
-            if damping is None:
-                W = 1
-            elif damping == 'exp':
-                W = Wexp(mu, X_FoG_p)
-            elif damping == 'lor':
-                W = Wlorentz(mu, X_FoG_p)
-            elif damping == 'vdg':
-                W = Winfty(mu, X_FoG_p)
-            else:
-                W = 1
+        W = fog_damping((kev * mu, X_FoG_p), (kev * mu, X_FoG_p), f=f0, sigma2v=sigma2w, damping=damping)
 
         PK = W * PloopSPTs(mu, b1, b2, bs2, b3nl) + Pshot(mu, alphashot0, alphashot2, PshotP)
 
@@ -1646,18 +1637,11 @@ class RSDMultipolesPowerSpectrumCalculator:
         if damping_method is not None:
             # Damping of the tree-level Kaiser term: same kernel as get_eft_pkmu's, with the
             # wiggle table's sigma2w (table trailing entries are [..., sigma2w, f0]).
+            if damping not in ('exp', 'lor', 'vdg'):
+                raise ValueError(f"damping_method={damping_method!r} requires damping 'exp', 'lor' or 'vdg', got {damping!r}")
             X_FoG_p = pars[-1]
             sigma2w = table[-2]
-            if damping == 'exp':
-                W_tree = np.exp(-(f0 * k * mu * X_FoG_p)**2 * sigma2w)
-            elif damping == 'lor':
-                W_tree = 1.0 / (1.0 + (f0 * k * mu * X_FoG_p)**2 * sigma2w)
-            elif damping == 'vdg':
-                c2 = (f0 * k * mu)**2
-                denom = 1.0 + c2 * X_FoG_p**2
-                W_tree = np.exp(-c2 * sigma2w / denom) / np.sqrt(denom)
-            else:
-                raise ValueError(f"damping_method={damping_method!r} requires damping 'exp', 'lor' or 'vdg', got {damping!r}")
+            W_tree = fog_damping((k * mu, X_FoG_p), (k * mu, X_FoG_p), f=f0, sigma2v=sigma2w, damping=damping)
         # Sigma² tot for IR-resummations, see eq.~ 3.59 at arXiv:2208.02791
         if IR_resummation:
             sigma2t = (1 + f0*mu**2 * (2 + f0))*sigma2 + (f0*mu)**2 * (mu**2 - 1) * delta_sigma2
@@ -2356,63 +2340,15 @@ class BispectrumCalculator:
         B23 = (2 * self.Z2(k2AP, k3AP, x23AP, mu2AP, mu3AP, f, b1, b2, bs) * Z1eft2*pkIR2 * Z1eft3*pkIR3)
         B31 = (2 * self.Z2(k3AP, k1AP, x31AP, mu3AP, mu1AP, f, b1, b2, bs) * Z1eft3*pkIR3 * Z1eft1*pkIR1) 
         
-        Wlor,Wexp,Wvdg=1,1,1
-        
-        l2 = (k1AP * mu1AP)**2 + (k2AP * mu2AP)**2 + (k3AP * mu3AP)**2
-         
-        if damping == 'lor':
-            l2   = 0.5 * l2 * (f * X_FoG_b)**2
-            Wlor = 1.0 / (1.0 + l2 * sigma2v)
-        elif damping == 'exp':
-            l2   = 0.5 * l2 * (f * X_FoG_b)**2
-            Wexp = np.exp(- l2 * sigma2v)
-        elif damping == 'vdg':
-            l123_2   = - 0.5 * l2 * f**2
-            X2       = X_FoG_b**2
-            exp      = l123_2 * sigma2v /(1-l123_2*X2)
-            Winfty   = np.exp(exp) / (1-l123_2*X2)**1.5
-            
-        # l2 = (k1AP * mu1AP)**2 + (k2AP * mu2AP)**2 + (k3AP * mu3AP)**2            
-        # l2    = 0.5 * l2 * (f * X_FoG_b)**2
-        # Wlor = 1.0 / (1.0 + l2 * sigma2v)
-        
-        
-#             def Winfty(mu, X_FoG_p):
-#             c2= (f0*kev*mu)**2
-#             X2=X_FoG_p**2
-#             exp = - c2 * sigma2w /(1+c2*X2)
-#             W   =np.exp(exp) / np.sqrt(1+c2*X2)
-#             return W 
-
-#         def Wexp(mu, X_FoG_p):
-#             l2= (f0*kev*mu*X_FoG_p)**2
-#             exp = - l2 * sigma2w
-#             W   =np.exp(exp)
-#             return W  
-
-#         def Wlorentz(mu, X_FoG_p):
-#             l2= (f0*kev*mu*X_FoG_p)**2
-#             x2 = l2 * sigma2w
-#             W   = 1.0/(1.0+x2)
-#             return W 
-
-
-
+        W = fog_damping((k1AP * mu1AP, X_FoG_b), (k2AP * mu2AP, X_FoG_b), (k3AP * mu3AP, X_FoG_b),
+                        f=f, sigma2v=sigma2v, damping=damping)
 
 
         if not getattr(self, '_printed_model_damping_bk', False):
             print(f"[FOLPS] Model Bk: {self.model}, Damping: {damping}")
             self._printed_model_damping_bk = True
 
-        if damping == 'lor':
-            W = Wlor
-        elif damping == 'vdg':
-            W = Winfty
-        elif damping == 'exp':
-            W = Wexp
-        else:
-            W = 1            
-            
+
         # if self.model == "EFT":
         #     W = 1
         # elif self.model == "TNS":
@@ -3296,63 +3232,15 @@ class BispectrumCalculator_fk:
         B23 = (2 * self.Z2(k2AP, k3AP, x23AP, mu2AP, mu3AP, f, f2, f3, b1, b2, bs,calA,calAp) * Z1eft2*pkIR2 * Z1eft3*pkIR3)
         B31 = (2 * self.Z2(k3AP, k1AP, x31AP, mu3AP, mu1AP, f, f3, f1, b1, b2, bs,calA,calAp) * Z1eft3*pkIR3 * Z1eft1*pkIR1) 
         
-        Wlor,Wexp,Wvdg=1,1,1
-        
-        l2 = (k1AP * mu1AP)**2 + (k2AP * mu2AP)**2 + (k3AP * mu3AP)**2
-         
-        if damping == 'lor':
-            l2   = 0.5 * l2 * (f * X_FoG_b)**2
-            Wlor = 1.0 / (1.0 + l2 * sigma2v)
-        elif damping == 'exp':
-            l2   = 0.5 * l2 * (f * X_FoG_b)**2
-            Wexp = np.exp(- l2 * sigma2v)
-        elif damping == 'vdg':
-            l123_2   = - 0.5 * l2 * f**2
-            X2       = X_FoG_b**2
-            exp      = l123_2 * sigma2v /(1-l123_2*X2)
-            Winfty   = np.exp(exp) / (1-l123_2*X2)**1.5
-            
-        # l2 = (k1AP * mu1AP)**2 + (k2AP * mu2AP)**2 + (k3AP * mu3AP)**2            
-        # l2    = 0.5 * l2 * (f * X_FoG_b)**2
-        # Wlor = 1.0 / (1.0 + l2 * sigma2v)
-        
-        
-#             def Winfty(mu, X_FoG_p):
-#             c2= (f0*kev*mu)**2
-#             X2=X_FoG_p**2
-#             exp = - c2 * sigma2w /(1+c2*X2)
-#             W   =np.exp(exp) / np.sqrt(1+c2*X2)
-#             return W 
-
-#         def Wexp(mu, X_FoG_p):
-#             l2= (f0*kev*mu*X_FoG_p)**2
-#             exp = - l2 * sigma2w
-#             W   =np.exp(exp)
-#             return W  
-
-#         def Wlorentz(mu, X_FoG_p):
-#             l2= (f0*kev*mu*X_FoG_p)**2
-#             x2 = l2 * sigma2w
-#             W   = 1.0/(1.0+x2)
-#             return W 
-
-
-
+        W = fog_damping((k1AP * mu1AP, X_FoG_b), (k2AP * mu2AP, X_FoG_b), (k3AP * mu3AP, X_FoG_b),
+                        f=f, sigma2v=sigma2v, damping=damping)
 
 
         if not getattr(self, '_printed_model_damping_bk', False):
             print(f"[FOLPS] Model Bk: {self.model}, Damping: {damping}")
             self._printed_model_damping_bk = True
 
-        if damping == 'lor':
-            W = Wlor
-        elif damping == 'vdg':
-            W = Winfty
-        elif damping == 'exp':
-            W = Wexp
-        else:
-            W = 1            
-            
+
         # if self.model == "EFT":
         #     W = 1
         # elif self.model == "TNS":
