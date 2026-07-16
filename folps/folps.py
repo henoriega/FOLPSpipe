@@ -1380,6 +1380,23 @@ def fog_damping(*kmu_X, f=1., sigma2v=1., damping='lor'):
     raise ValueError(f"damping must be None, 'exp', 'lor' or 'vdg', got {damping!r}")
 
 
+def _normalize_damping_method(damping_method):
+    """Normalize / validate ``damping_method``; see :meth:`RSDMultipolesPowerSpectrumCalculator.get_rsd_pkmu`.
+
+    ``None`` (the default) is an alias for ``'tree+loop+ctr'``, ``'all'`` for
+    ``'tree+loop+ctr+sn'``; legacy ``'tree'`` and ``'tree-gtns'`` are deprecated and raise.
+    """
+    if damping_method is None:
+        return 'tree+loop+ctr'
+    if damping_method in ('tree', 'tree-gtns'):
+        raise ValueError(f"damping_method={damping_method!r} is deprecated; use 'tree+loop+ctr' (GTNS removed)")
+    if damping_method == 'all':
+        return 'tree+loop+ctr+sn'
+    if damping_method not in ('loop+ctr', 'tree+loop', 'tree+loop+ctr', 'tree+loop+ctr+sn'):
+        raise ValueError(f"damping_method must be None / 'tree+loop+ctr' (default), 'tree+loop' or 'tree+loop+ctr+sn' (alias 'all'), got {damping_method!r}")
+    return damping_method
+
+
 class RSDMultipolesPowerSpectrumCalculator:
     """
     A class to calculate the redshift space power spectrum multipoles with flexible bias schemes.
@@ -1493,11 +1510,16 @@ class RSDMultipolesPowerSpectrumCalculator:
     def get_eft_pkmu(self, kev, mu, pars, table, damping='lor', damping_method=None):
         """Calculate the EFT galaxy power spectrum in redshift space.
 
-        damping_method: None (default) leaves the tree-level Kaiser term (added in
-        get_rsd_pkmu) undamped; 'tree' damps it too (handled in get_rsd_pkmu; here a no-op);
-        'tree-gtns' additionally removes the GTNS term from the damped loop bracket, since the
-        tree-level damping then resums it non-perturbatively (avoids O(lambda^2) double counting).
+        damping_method: which terms the FoG damping kernel multiplies (the tree-level Kaiser
+        term itself is handled in get_rsd_pkmu; here it only controls GTNS and the ctr/sn
+        factors). 'tree+loop' damps the tree-level Kaiser term and the loop bracket only;
+        'tree+loop+ctr' (default; None is an alias) additionally the counterterms;
+        'tree+loop+ctr+sn' (alias 'all') additionally the shot noise. All options remove
+        the GTNS term from the damped loop bracket, since the tree-level damping resums
+        it non-perturbatively (avoids O(lambda^2) double counting).
+        Legacy 'tree'/'tree-gtns' are deprecated and raise (use 'tree+loop+ctr').
         """
+        damping_method = _normalize_damping_method(damping_method)
         (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4, ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) = pars
 
         if A_full_status:
@@ -1553,8 +1575,8 @@ class RSDMultipolesPowerSpectrumCalculator:
             return b1**4 * Df(mu, f0 / b1)
 
         def GTNS(mu, b1):
-            # 'tree-gtns': the tree-level damping (get_rsd_pkmu) resums this term non-perturbatively.
-            if use_TNS_model_status or damping_method == 'tree-gtns':
+            # Tree-damping methods: the tree-level damping (get_rsd_pkmu) resums this term non-perturbatively.
+            if use_TNS_model_status or damping_method.startswith('tree'):
                 return 0
             else:
                 return -((kev * mu * f0)**2 * sigma2w * (b1**2 * pkl + 2 * b1 * f0 * mu**2 * Pdt_L + f0**2 * mu**4 * Ptt_L))
@@ -1596,7 +1618,9 @@ class RSDMultipolesPowerSpectrumCalculator:
             self._printed_model_damping_pk = True
 
         if self.model == "EFT":
+            # EFT ignores FoG damping entirely: tree-level Kaiser undamped, GTNS kept.
             damping = None
+            damping_method = 'loop+ctr'
         elif self.model == "TNS":
             if not use_TNS_model_status:
                 raise RuntimeError("[FOLPS] To use the TNS model, you must set use_TNS_model=True in MatrixCalculator.")
@@ -1605,22 +1629,29 @@ class RSDMultipolesPowerSpectrumCalculator:
                 print("[FOLPS] For FOLPSD you must specify a damping ('exp', 'lor', 'vdg'). Default: 'lor'.")
                 damping = 'lor'
         W = fog_damping((kev * mu, X_FoG_p), (kev * mu, X_FoG_p), f=f0, sigma2v=sigma2w, damping=damping)
+        # Which terms the kernel multiplies: loop bracket always; ctr/sn if named in damping_method.
+        W_ctr = 1. if 'ctr' not in damping_method else W
+        W_sn = 1. if 'sn' not in damping_method else W
 
-        PK = W * PloopSPTs(mu, b1, b2, bs2, b3nl) + Pshot(mu, alphashot0, alphashot2, PshotP)
+        PK = W * PloopSPTs(mu, b1, b2, bs2, b3nl) + W_sn * Pshot(mu, alphashot0, alphashot2, PshotP)
 
-        return PK + W * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, b1, ctilde))
+        return PK + W_ctr * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, b1, ctilde))
 
     def get_rsd_pkmu(self, k, mu, pars, table, table_now, IR_resummation=True, damping='lor', damping_method=None):
         """Return redshift space P(k, mu) given input tables.
 
-        damping_method: None (default) applies the FoG damping only to the loop bracket
-        (get_eft_pkmu), leaving the tree-level Kaiser term undamped; 'tree' also damps the
-        tree-level Kaiser term with the same kernel (COMET VDG-like convention, GTNS kept);
-        'tree-gtns' additionally removes the GTNS term from the damped loop bracket
-        (double-counting-free: the tree-level damping resums it non-perturbatively).
+        damping_method: which terms the FoG damping kernel multiplies. 'tree+loop' damps
+        the tree-level Kaiser term and the loop bracket only; 'tree+loop+ctr' (default;
+        None is an alias) additionally the counterterms; 'tree+loop+ctr+sn' (alias 'all')
+        additionally the shot noise. All options remove the GTNS term from the damped
+        loop bracket (double-counting-free: the tree-level damping resums it
+        non-perturbatively). Legacy 'tree'/'tree-gtns' are deprecated and raise (use
+        'tree+loop+ctr'). The EFT model ignores damping_method (no damping, GTNS kept).
         """
-        if damping_method not in (None, 'tree', 'tree-gtns'):
-            raise ValueError(f"damping_method must be None, 'tree' or 'tree-gtns', got {damping_method!r}")
+        damping_method = _normalize_damping_method(damping_method)
+        if self.model == "EFT":
+            # EFT ignores FoG damping entirely (see get_eft_pkmu): tree-level Kaiser undamped, GTNS kept.
+            damping_method = 'loop+ctr'
         table = self.interp_table(k, table, A_full_status)
         table_now = self.interp_table(k, table_now, A_full_status)
         b1 = pars[0]
@@ -1629,7 +1660,7 @@ class RSDMultipolesPowerSpectrumCalculator:
         pkl, pkl_now = table[0], table_now[0]
         sigma2, delta_sigma2 = table_now[-3:-1]
         W_tree = 1.
-        if damping_method is not None:
+        if damping_method.startswith('tree'):
             # Damping of the tree-level Kaiser term: same kernel as get_eft_pkmu's, with the
             # wiggle table's sigma2w (table trailing entries are [..., sigma2w, f0]).
             if damping not in ('exp', 'lor', 'vdg'):
@@ -1641,7 +1672,7 @@ class RSDMultipolesPowerSpectrumCalculator:
         if IR_resummation:
             sigma2t = (1 + f0*mu**2 * (2 + f0))*sigma2 + (f0*mu)**2 * (mu**2 - 1) * delta_sigma2
         else:
-            sigma2t =0
+            sigma2t = 0
         pkmu = (W_tree * (b1 + fk * mu**2)**2 * (pkl_now + np.exp(-k**2 * sigma2t)*(pkl - pkl_now)*(1 + k**2 * sigma2t))
                  + np.exp(-k**2 * sigma2t) * self.get_eft_pkmu(k, mu, pars, table, damping, damping_method=damping_method)
                  + (1 - np.exp(-k**2 * sigma2t)) * self.get_eft_pkmu(k, mu, pars, table_now, damping, damping_method=damping_method))
@@ -1726,11 +1757,12 @@ def get_rsd_pkell_marg_const(
         else:
             sigma2t = 0.0
 
-        # Compute pkmu
+        # Compute pkmu. The tree-level Kaiser term below is undamped and the analytic
+        # derivatives assume the original FOLPSD convention: pin damping_method='loop+ctr'.
         pkmu = (
             (b1 + fk * mu**2)**2 * (pkl_now + np.exp(-k**2 * sigma2t) * (pkl - pkl_now) * (1 + k**2 * sigma2t))
-            + np.exp(-k**2 * sigma2t) * multipoles.get_eft_pkmu(k, mu, pars_const, table_interp, damping)
-            + (1 - np.exp(-k**2 * sigma2t)) * multipoles.get_eft_pkmu(k, mu, pars_const, table_now_interp, damping)
+            + np.exp(-k**2 * sigma2t) * multipoles.get_eft_pkmu(k, mu, pars_const, table_interp, damping, damping_method='loop+ctr')
+            + (1 - np.exp(-k**2 * sigma2t)) * multipoles.get_eft_pkmu(k, mu, pars_const, table_now_interp, damping, damping_method='loop+ctr')
         )
         return pkmu
 
