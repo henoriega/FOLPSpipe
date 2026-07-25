@@ -6,6 +6,8 @@
 # ============================================================================================ #
 
 import os
+from typing import NamedTuple
+
 import scipy
 from scipy import special
 from scipy import integrate
@@ -25,6 +27,29 @@ except ImportError:
 
 # Global variable to store the preferred backend (default: 'numpy')
 PREFERRED_BACKEND = os.environ.get("FOLPS_BACKEND", "numpy")  #options:"numpy" & "jax" 
+
+
+class _PowerSpectrumBias(NamedTuple):
+    b1: object
+    b2: object
+    bs2: object
+    b3nl: object
+
+
+class _PowerSpectrumNuisance(NamedTuple):
+    alpha0: object
+    alpha2: object
+    alpha4: object
+    ctilde: object
+    alphashot0: object
+    alphashot2: object
+    PshotP: object
+    X_FoG_p: object
+
+
+class _PowerSpectrumParameters(NamedTuple):
+    bias: _PowerSpectrumBias
+    nuisance: _PowerSpectrumNuisance
 
 class BackendManager:
     def __init__(self, preferred_backend='numpy'):
@@ -1399,6 +1424,46 @@ class RSDMultipolesPowerSpectrumCalculator:
         
         return pars
      
+    def _split_power_pars(self, pars):
+        if len(pars) != 12:
+            raise ValueError(
+                "power-spectrum parameters must contain exactly 12 values "
+                "(b1, b2, bs2, b3nl, alpha0, alpha2, alpha4, ctilde, "
+                "alphashot0, alphashot2, PshotP, X_FoG_p)."
+            )
+        (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4, ctilde,
+         alphashot0, alphashot2, PshotP, X_FoG_p) = pars
+        return _PowerSpectrumParameters(
+            bias=_PowerSpectrumBias(b1, b2, bs2, b3nl),
+            nuisance=_PowerSpectrumNuisance(
+                alpha0, alpha2, alpha4, ctilde,
+                alphashot0, alphashot2, PshotP, X_FoG_p,
+            ),
+        )
+
+    def _split_cross_nuisance(self, cross_nuisance):
+        if len(cross_nuisance) == 8:
+            return _PowerSpectrumNuisance(*cross_nuisance)
+        if len(cross_nuisance) == 12:
+            return self._split_power_pars(cross_nuisance).nuisance
+        raise ValueError(
+            "cross_nuisance must contain either 8 pair-level values "
+            "(alpha0, alpha2, alpha4, ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) "
+            "or a 12-value FOLPS parameter array whose last 8 values are used."
+        )
+
+    def _resolve_pair_parameters(self, pars, pars_b=None, cross_nuisance=None):
+        params_a = self._split_power_pars(pars)
+        params_b = params_a if pars_b is None else self._split_power_pars(pars_b)
+        if pars_b is not None and cross_nuisance is None:
+            raise ValueError(
+                "cross_nuisance must be supplied when pars_b is supplied; "
+                "pair-level EFT and stochastic parameters must be specified explicitly "
+                "for a cross-spectrum."
+            )
+        nuisance = params_a.nuisance if cross_nuisance is None else self._split_cross_nuisance(cross_nuisance)
+        return params_a.bias, params_b.bias, nuisance
+
     
     def interp_table(self, k, table, A_full_status):
         """Interpolation of non-linear terms.
@@ -1451,10 +1516,19 @@ class RSDMultipolesPowerSpectrumCalculator:
         F = qpar / qper
         return (muobs / F) * (1 + muobs**2 * (1 / F**2 - 1))**-0.5
 
-    def get_eft_pkmu(self, kev, mu, pars, table, damping='lor'):
-        """Calculate the EFT galaxy power spectrum in redshift space."""
-        (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4, ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) = pars
+    def _validate_cross_spectrum_model(self, pars_b):
+        if pars_b is not None and self.model != "EFT":
+            raise ValueError(
+                "Cross power spectra currently support standard EFT only. "
+                "Use model='EFT' for pars_b/cross_nuisance; auto spectra keep the existing damping behavior."
+            )
 
+    def _get_eft_pkmu_pair(self, kev, mu, bias_a, bias_b, nuisance, table, damping='lor'):
+        """Shared pair-level one-loop contraction used by auto and cross spectra."""
+        (b1_a, b2_a, bs2_a, b3nl_a) = bias_a
+        (b1_b, b2_b, bs2_b, b3nl_b) = bias_b
+        (alpha0, alpha2, alpha4, ctilde,
+         alphashot0, alphashot2, PshotP, X_FoG_p) = nuisance
         Winfty_all = False  # change to False for VDG and no analytical marginalization
 
         if A_full_status:
@@ -1475,65 +1549,80 @@ class RSDMultipolesPowerSpectrumCalculator:
         Pdt_L = pkl * Fkoverf0
         Ptt_L = pkl * Fkoverf0**2
 
-        def PddXloop(b1, b2, bs2, b3nl):
-            return (b1**2 * Ploop_dd + 2 * b1 * b2 * Pb1b2 + 2 * b1 * bs2 * Pb1bs2 + b2**2 * Pb22
-                    + 2 * b2 * bs2 * Pb2bs2 + bs2**2 * Pb2s2 + 2 * b1 * b3nl * sigma23pkl)
+        def PddXloop_cross():
+            return (
+                b1_a * b1_b * Ploop_dd
+                + (b1_a * b2_b + b2_a * b1_b) * Pb1b2
+                + (b1_a * bs2_b + bs2_a * b1_b) * Pb1bs2
+                + b2_a * b2_b * Pb22
+                + (b2_a * bs2_b + bs2_a * b2_b) * Pb2bs2
+                + bs2_a * bs2_b * Pb2s2
+                + (b1_a * b3nl_b + b3nl_a * b1_b) * sigma23pkl
+            )
 
         def PdtXloop(b1, b2, bs2, b3nl):
             return b1 * Ploop_dt + b2 * Pb2t + bs2 * Pbs2t + b3nl * Fkoverf0 * sigma23pkl
 
-        def PttXloop(b1, b2, bs2, b3nl):
-            return Ploop_tt
+        def ATNS_cross(mu):
+            return (
+                b1_a * b1_b * f0 * mu**2 * I1udd_1
+                + 0.5 * (b1_a + b1_b) * f0**2 * (mu**2 * I2uud_1 + mu**4 * I2uud_2)
+                + f0**3 * (mu**4 * I3uuu_2 + mu**6 * I3uuu_3)
+            )
 
-        def Af(mu, f0):
-            return (f0 * mu**2 * I1udd_1 + f0**2 * (mu**2 * I2uud_1 + mu**4 * I2uud_2)
-                    + f0**3 * (mu**4 * I3uuu_2 + mu**6 * I3uuu_3))
+        def ATNS_b2_bs2_cross(mu):
+            return (
+                0.25 * (b2_a * b1_b + b1_a * b2_b) * f0 * mu**2 * I1udd_1_b2
+                + 0.25 * (b2_a + b2_b) * f0**2 * (mu**2 * I2uud_1_b2 + mu**4 * I2uud_2_b2)
+                + 0.25 * (bs2_a * b1_b + b1_a * bs2_b) * f0 * mu**2 * I1udd_1_bs2
+                + 0.25 * (bs2_a + bs2_b) * f0**2 * (mu**2 * I2uud_1_bs2 + mu**4 * I2uud_2_bs2)
+            )
 
-        def Af_b2(mu, f0):
-            return (f0*mu**2 * I1udd_1_b2 +  f0**2 * (mu**2 * I2uud_1_b2 +  mu**4 * I2uud_2_b2) )
+        def DRSD_cross(mu):
+            D2 = mu**2 * I2uudd_1D + mu**4 * I2uudd_2D
+            D3 = mu**2 * I3uuud_1B + mu**4 * I3uuud_2D + mu**6 * I3uuud_3D
+            D4 = (
+                mu**2 * I4uuuu_1B
+                + mu**4 * I4uuuu_2D
+                + mu**6 * I4uuuu_3D
+                + mu**8 * I4uuuu_4D
+            )
+            return b1_a * b1_b * f0**2 * D2 + 0.5 * (b1_a + b1_b) * f0**3 * D3 + f0**4 * D4
 
-        def Af_bs2(mu, f0):
-            return (f0*mu**2 * I1udd_1_bs2 +  f0**2 * (mu**2 * I2uud_1_bs2 +  mu**4 * I2uud_2_bs2) )
-
-        def Df(mu, f0):
-            return (f0**2 * (mu**2 * I2uudd_1D + mu**4 * I2uudd_2D)
-                    + f0**3 * (mu**2 * I3uuud_1B + mu**4 * I3uuud_2D + mu**6 * I3uuud_3D)
-                    + f0**4 * (mu**2 * I4uuuu_1B + mu**4 * I4uuuu_2D + mu**6 * I4uuuu_3D + mu**8 * I4uuuu_4D))
-
-        def ATNS(mu, b1):
-            return b1**3 * Af(mu, f0 / b1)
-
-        def ATNS_b2_bs2(mu, b1, b2, bs2):
-            return b1**3 * Af_b2(mu, f0/b1) * b2/(2*b1) +  b1**3 * Af_bs2(mu, f0/b1) * bs2/(2*b1)
-
-        def DRSD(mu, b1):
-            return b1**4 * Df(mu, f0 / b1)
-
-        def GTNS(mu, b1):
+        def GTNS_cross(mu):
             if use_TNS_model_status:
                 return 0
             else:
-                return -((kev * mu * f0)**2 * sigma2w * (b1**2 * pkl + 2 * b1 * f0 * mu**2 * Pdt_L + f0**2 * mu**4 * Ptt_L))
+                return -(
+                    (kev * mu * f0)**2
+                    * sigma2w
+                    * (
+                        b1_a * b1_b * pkl
+                        + (b1_a + b1_b) * f0 * mu**2 * Pdt_L
+                        + f0**2 * mu**4 * Ptt_L
+                    )
+                )
 
-        def PloopSPTs(mu, b1, b2, bs2, b3nl):
+        def PloopSPTs_cross(mu):
+            Pdt_a = PdtXloop(b1_a, b2_a, bs2_a, b3nl_a)
+            Pdt_b = PdtXloop(b1_b, b2_b, bs2_b, b3nl_b)
+            loop = (
+                PddXloop_cross()
+                + f0 * mu**2 * (Pdt_a + Pdt_b)
+                + mu**4 * f0**2 * Ploop_tt
+                + ATNS_cross(mu)
+                + DRSD_cross(mu)
+                + GTNS_cross(mu)
+            )
             if A_full_status:
-                return (
-                        PddXloop(b1, b2, bs2, b3nl) + 2*f0*mu**2 * PdtXloop(b1, b2, bs2, b3nl)
-                        + mu**4 * f0**2 * PttXloop(b1, b2, bs2, b3nl) + ATNS(mu, b1) + DRSD(mu, b1)
-                        + GTNS(mu, b1) + ATNS_b2_bs2(mu, b1, b2, bs2)
-                )
-            else:
-                return (
-                    PddXloop(b1, b2, bs2, b3nl) + 2*f0*mu**2 * PdtXloop(b1, b2, bs2, b3nl)
-                    + mu**4 * f0**2 * PttXloop(b1, b2, bs2, b3nl) + ATNS(mu, b1) + DRSD(mu, b1)
-                    + GTNS(mu, b1)
-                )
+                loop = loop + ATNS_b2_bs2_cross(mu)
+            return loop
 
-        def PKaiserLs(mu, b1):
-            return (b1 + mu**2 * fk)**2 * pkl
+        def PKaiserLs_cross(mu):
+            return (b1_a + mu**2 * fk) * (b1_b + mu**2 * fk) * pkl
 
-        def PctNLOs(mu, b1, ctilde):
-            return ctilde * (mu * kev * f0)**4 * sigma2w**2 * PKaiserLs(mu, b1)
+        def PctNLOs(mu, ctilde):
+            return ctilde * (mu * kev * f0)**4 * sigma2w**2 * PKaiserLs_cross(mu)
 
         def Pcts(mu, alpha0, alpha2, alpha4):
             return (alpha0 + alpha2 * mu**2 + alpha4 * mu**4) * kev**2 * pkl
@@ -1610,18 +1699,28 @@ class RSDMultipolesPowerSpectrumCalculator:
             else:
                 W = 1
 
-        PK = W * PloopSPTs(mu, b1, b2, bs2, b3nl) + Pshot(mu, alphashot0, alphashot2, PshotP)
+        PK = W * PloopSPTs_cross(mu) + Pshot(mu, alphashot0, alphashot2, PshotP)
 
         if Winfty_all == False:
             W = 1.0
        
-        return PK + W * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, b1, ctilde))
+        return PK + W * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, ctilde))
 
-    def get_rsd_pkmu(self, k, mu, pars, table, table_now, IR_resummation=True, damping='lor'):
+    def get_eft_pkmu(self, kev, mu, pars, table, damping='lor', *, pars_b=None, cross_nuisance=None):
+        """Calculate the EFT power-spectrum contribution in redshift space."""
+        self._validate_cross_spectrum_model(pars_b)
+        bias_a, bias_b, nuisance = self._resolve_pair_parameters(pars, pars_b, cross_nuisance)
+        return self._get_eft_pkmu_pair(kev, mu, bias_a, bias_b, nuisance, table, damping)
+
+    def get_rsd_pkmu(
+            self, k, mu, pars, table, table_now, IR_resummation=True, damping='lor',
+            *, pars_b=None, cross_nuisance=None):
         """Return redshift space P(k, mu) given input tables."""
+        self._validate_cross_spectrum_model(pars_b)
         table = self.interp_table(k, table, A_full_status)
         table_now = self.interp_table(k, table_now, A_full_status)
-        b1 = pars[0]
+        bias_a, bias_b, nuisance = self._resolve_pair_parameters(pars, pars_b, cross_nuisance)
+        b1_a, b1_b = bias_a.b1, bias_b.b1
         f0 = table[-1]
         fk = table[1] * f0
         pkl, pkl_now = table[0], table_now[0]
@@ -1631,13 +1730,16 @@ class RSDMultipolesPowerSpectrumCalculator:
             sigma2t = (1 + f0*mu**2 * (2 + f0))*sigma2 + (f0*mu)**2 * (mu**2 - 1) * delta_sigma2
         else:
             sigma2t =0
-        pkmu = ((b1 + fk * mu**2)**2 * (pkl_now + np.exp(-k**2 * sigma2t)*(pkl - pkl_now)*(1 + k**2 * sigma2t))
-                 + np.exp(-k**2 * sigma2t) * self.get_eft_pkmu(k, mu, pars, table, damping)
-                 + (1 - np.exp(-k**2 * sigma2t)) * self.get_eft_pkmu(k, mu, pars, table_now, damping))
+        exp_ir = np.exp(-k**2 * sigma2t)
+        PKaiserLs = (b1_a + fk * mu**2) * (b1_b + fk * mu**2)
+        pkmu = (PKaiserLs * (pkl_now + exp_ir * (pkl - pkl_now) * (1 + k**2 * sigma2t))
+                 + exp_ir * self._get_eft_pkmu_pair(k, mu, bias_a, bias_b, nuisance, table, damping)
+                 + (1 - exp_ir) * self._get_eft_pkmu_pair(k, mu, bias_a, bias_b, nuisance, table_now, damping))
         return pkmu
 
     def get_rsd_pkell(self, kobs, qpar, qper, pars, table, table_now,
-                      bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True):
+                      bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True,
+                      *, pars_b=None, cross_nuisance=None, bias_scheme_b=None):
         """
         Computes the redshift-space power spectrum multipoles P_ell(k).
 
@@ -1652,11 +1754,16 @@ class RSDMultipolesPowerSpectrumCalculator:
             nmu (int): Number of points for GL integration
             ells (tuple): Multipoles
             IR_resummation (bool): Whether to apply IR resummation.
+            pars_b (list, optional): Nuisance parameters for tracer B. If omitted, auto mode is used.
+            cross_nuisance (list, optional): Pair-level EFT/stochastic parameters.
+            bias_scheme_b (str, optional): Bias scheme for tracer B. Defaults to bias_scheme.
 
         Returns:
             array: Power spectrum multipoles for each ell.
         """
         pars = self.set_bias_scheme(pars, bias_scheme=bias_scheme)
+        if pars_b is not None:
+            pars_b = self.set_bias_scheme(pars_b, bias_scheme=bias_scheme if bias_scheme_b is None else bias_scheme_b)
         
         def weights_leggauss(nx, sym=False):
             """Return weights for Gauss-Legendre integration."""
@@ -1670,7 +1777,10 @@ class RSDMultipolesPowerSpectrumCalculator:
         wmu = np.array([wmu * (2 * ell + 1) * legendre(ell)(muobs) for ell in ells])
         jac, kap, muap = (qpar * qper**2)**(-1), self.k_ap(kobs[:, None], muobs, qpar, qper), self.mu_ap(muobs, qpar, qper)[None, :]
         #print(muap[0])
-        pkmu = jac * self.get_rsd_pkmu(kap, muap, pars, table, table_now, IR_resummation, damping)
+        pkmu = jac * self.get_rsd_pkmu(
+            kap, muap, pars, table, table_now, IR_resummation, damping,
+            pars_b=pars_b, cross_nuisance=cross_nuisance,
+        )
         return np.sum(pkmu * wmu[:, None, :], axis=-1)     
 
 
