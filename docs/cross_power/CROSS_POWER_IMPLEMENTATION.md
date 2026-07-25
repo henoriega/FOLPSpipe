@@ -200,6 +200,12 @@ Relevant commands:
 - current auto-spectrum regression against existing backend artifacts;
 - NumPy/JAX cross agreement with `rtol=5e-3`, `atol=5e-2`.
 
+## Tutorial notebook
+
+A public, self-contained NumPy tutorial for the equal-time two-tracer
+power-spectrum API is available at
+[`notebooks/example_cross_power_numpy.ipynb`](../../notebooks/example_cross_power_numpy.ipynb).
+
 ## Example
 
 ```python
