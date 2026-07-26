@@ -1462,7 +1462,7 @@ class RSDMultipolesPowerSpectrumCalculator:
                 "for a cross-spectrum."
             )
         nuisance = params_a.nuisance if cross_nuisance is None else self._split_cross_nuisance(cross_nuisance)
-        return params_a.bias, params_b.bias, nuisance
+        return params_a, params_b, nuisance, pars_b is not None
 
     
     def interp_table(self, k, table, A_full_status):
@@ -1517,14 +1517,72 @@ class RSDMultipolesPowerSpectrumCalculator:
         return (muobs / F) * (1 + muobs**2 * (1 / F**2 - 1))**-0.5
 
     def _validate_cross_spectrum_model(self, pars_b):
-        if pars_b is not None and self.model != "EFT":
+        if pars_b is not None and self.model not in ("EFT", "FOLPSD"):
             raise ValueError(
-                "Cross power spectra currently support standard EFT only. "
-                "Use model='EFT' for pars_b/cross_nuisance; auto spectra keep the existing damping behavior."
+                "Cross power spectra support model='EFT' or model='FOLPSD' "
+                "when pars_b/cross_nuisance are supplied; auto spectra keep "
+                "the existing damping behavior."
             )
 
-    def _get_eft_pkmu_pair(self, kev, mu, bias_a, bias_b, nuisance, table, damping='lor'):
+    def _validate_cross_damping_mode(self, pars_b, cross_damping_mode):
+        if pars_b is None:
+            return
+        accepted = ("single", "geometric")
+        if cross_damping_mode not in accepted:
+            raise ValueError(
+                "cross_damping_mode must be one of "
+                f"{accepted}; got {cross_damping_mode!r}."
+            )
+
+    def _validate_cross_damping_name(self, damping):
+        accepted = ("exp", "lor", "vdg")
+        if damping not in accepted:
+            raise ValueError(
+                "cross-spectrum damping must be one of "
+                f"{accepted} or None; got {damping!r}."
+            )
+
+    def _pk_damping_factor(self, kev, mu, f0, sigma2w, X_FoG_p, damping):
+        if damping == 'exp':
+            l2 = (f0 * kev * mu * X_FoG_p)**2
+            exp = -l2 * sigma2w
+            return np.exp(exp)
+        if damping == 'lor':
+            l2 = (f0 * kev * mu * X_FoG_p)**2
+            x2 = l2 * sigma2w
+            return 1.0 / (1.0 + x2)
+        if damping == 'vdg':
+            c2 = (f0 * kev * mu)**2
+            X2 = X_FoG_p**2
+            exp = -c2 * sigma2w / (1 + c2 * X2)
+            return np.exp(exp) / np.sqrt(1 + c2 * X2)
+        return 1
+
+    def _get_cross_damping(
+            self, kev, mu, f0, sigma2w, damping,
+            params_a, params_b, cross_nuisance, cross_damping_mode):
+        self._validate_cross_damping_mode(params_b, cross_damping_mode)
+        if damping is None:
+            return 1
+        self._validate_cross_damping_name(damping)
+        if cross_damping_mode == "single":
+            return self._pk_damping_factor(
+                kev, mu, f0, sigma2w, cross_nuisance.X_FoG_p, damping,
+            )
+        W_a = self._pk_damping_factor(
+            kev, mu, f0, sigma2w, params_a.nuisance.X_FoG_p, damping,
+        )
+        W_b = self._pk_damping_factor(
+            kev, mu, f0, sigma2w, params_b.nuisance.X_FoG_p, damping,
+        )
+        return np.sqrt(W_a * W_b)
+
+    def _get_eft_pkmu_pair(
+            self, kev, mu, params_a, params_b, nuisance, table, damping='lor',
+            cross_damping_mode="single", is_cross=False):
         """Shared pair-level one-loop contraction used by auto and cross spectra."""
+        bias_a = params_a.bias
+        bias_b = params_b.bias
         (b1_a, b2_a, bs2_a, b3nl_a) = bias_a
         (b1_b, b2_b, bs2_b, b3nl_b) = bias_b
         (alpha0, alpha2, alpha4, ctilde,
@@ -1630,25 +1688,6 @@ class RSDMultipolesPowerSpectrumCalculator:
         def Pshot(mu, alphashot0, alphashot2, PshotP):
             return PshotP * (alphashot0 + alphashot2 * (kev * mu)**2)
 
-        def Winfty(mu, X_FoG_p):
-            c2= (f0*kev*mu)**2
-            X2=X_FoG_p**2
-            exp = - c2 * sigma2w /(1+c2*X2)
-            W   =np.exp(exp) / np.sqrt(1+c2*X2)
-            return W 
-
-        def Wexp(mu, X_FoG_p):
-            l2= (f0*kev*mu*X_FoG_p)**2
-            exp = - l2 * sigma2w
-            W   =np.exp(exp)
-            return W  
-
-        def Wlorentz(mu, X_FoG_p):
-            l2= (f0*kev*mu*X_FoG_p)**2
-            x2 = l2 * sigma2w
-            W   = 1.0/(1.0+x2)
-            return W 
-
         # --- Model self.model ---
         if not getattr(self, '_printed_model_damping_pk', False):
             if self.model == "EFT" and damping is not None:
@@ -1667,37 +1706,28 @@ class RSDMultipolesPowerSpectrumCalculator:
             # TNS allows damping
             if damping is None:
                 W = 1
-            elif damping == 'exp':
-                W = Wexp(mu, X_FoG_p)
-            elif damping == 'lor':
-                W = Wlorentz(mu, X_FoG_p)
-            elif damping == 'vdg':
-                W = Winfty(mu, X_FoG_p)
             else:
-                W = 1
+                W = self._pk_damping_factor(kev, mu, f0, sigma2w, X_FoG_p, damping)
         elif self.model == "FOLPSD":
             if damping is None:
-                print("[FOLPS] For FOLPSD you must specify a damping ('exp', 'lor', 'vdg'). Default: 'lor'.")
-                damping = 'lor'
-            if damping == 'exp':
-                W = Wexp(mu, X_FoG_p)
-            elif damping == 'lor':
-                W = Wlorentz(mu, X_FoG_p)
-            elif damping == 'vdg':
-                W = Winfty(mu, X_FoG_p)
+                if is_cross:
+                    W = 1
+                else:
+                    print("[FOLPS] For FOLPSD you must specify a damping ('exp', 'lor', 'vdg'). Default: 'lor'.")
+                    damping = 'lor'
+                    W = self._pk_damping_factor(kev, mu, f0, sigma2w, X_FoG_p, damping)
+            elif is_cross:
+                W = self._get_cross_damping(
+                    kev, mu, f0, sigma2w, damping,
+                    params_a, params_b, nuisance, cross_damping_mode,
+                )
             else:
-                W = 1
+                W = self._pk_damping_factor(kev, mu, f0, sigma2w, X_FoG_p, damping)
         else:
             if damping is None:
                 W = 1
-            elif damping == 'exp':
-                W = Wexp(mu, X_FoG_p)
-            elif damping == 'lor':
-                W = Wlorentz(mu, X_FoG_p)
-            elif damping == 'vdg':
-                W = Winfty(mu, X_FoG_p)
             else:
-                W = 1
+                W = self._pk_damping_factor(kev, mu, f0, sigma2w, X_FoG_p, damping)
 
         PK = W * PloopSPTs_cross(mu) + Pshot(mu, alphashot0, alphashot2, PshotP)
 
@@ -1706,20 +1736,28 @@ class RSDMultipolesPowerSpectrumCalculator:
        
         return PK + W * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, ctilde))
 
-    def get_eft_pkmu(self, kev, mu, pars, table, damping='lor', *, pars_b=None, cross_nuisance=None):
-        """Calculate the EFT power-spectrum contribution in redshift space."""
+    def get_eft_pkmu(
+            self, kev, mu, pars, table, damping='lor', *, pars_b=None,
+            cross_nuisance=None, cross_damping_mode="single"):
+        """Calculate the EFT/FolpsD power-spectrum contribution in redshift space."""
         self._validate_cross_spectrum_model(pars_b)
-        bias_a, bias_b, nuisance = self._resolve_pair_parameters(pars, pars_b, cross_nuisance)
-        return self._get_eft_pkmu_pair(kev, mu, bias_a, bias_b, nuisance, table, damping)
+        self._validate_cross_damping_mode(pars_b, cross_damping_mode)
+        params_a, params_b, nuisance, is_cross = self._resolve_pair_parameters(pars, pars_b, cross_nuisance)
+        return self._get_eft_pkmu_pair(
+            kev, mu, params_a, params_b, nuisance, table, damping,
+            cross_damping_mode=cross_damping_mode, is_cross=is_cross,
+        )
 
     def get_rsd_pkmu(
             self, k, mu, pars, table, table_now, IR_resummation=True, damping='lor',
-            *, pars_b=None, cross_nuisance=None):
+            *, pars_b=None, cross_nuisance=None, cross_damping_mode="single"):
         """Return redshift space P(k, mu) given input tables."""
         self._validate_cross_spectrum_model(pars_b)
+        self._validate_cross_damping_mode(pars_b, cross_damping_mode)
         table = self.interp_table(k, table, A_full_status)
         table_now = self.interp_table(k, table_now, A_full_status)
-        bias_a, bias_b, nuisance = self._resolve_pair_parameters(pars, pars_b, cross_nuisance)
+        params_a, params_b, nuisance, is_cross = self._resolve_pair_parameters(pars, pars_b, cross_nuisance)
+        bias_a, bias_b = params_a.bias, params_b.bias
         b1_a, b1_b = bias_a.b1, bias_b.b1
         f0 = table[-1]
         fk = table[1] * f0
@@ -1733,13 +1771,20 @@ class RSDMultipolesPowerSpectrumCalculator:
         exp_ir = np.exp(-k**2 * sigma2t)
         PKaiserLs = (b1_a + fk * mu**2) * (b1_b + fk * mu**2)
         pkmu = (PKaiserLs * (pkl_now + exp_ir * (pkl - pkl_now) * (1 + k**2 * sigma2t))
-                 + exp_ir * self._get_eft_pkmu_pair(k, mu, bias_a, bias_b, nuisance, table, damping)
-                 + (1 - exp_ir) * self._get_eft_pkmu_pair(k, mu, bias_a, bias_b, nuisance, table_now, damping))
+                 + exp_ir * self._get_eft_pkmu_pair(
+                     k, mu, params_a, params_b, nuisance, table, damping,
+                     cross_damping_mode=cross_damping_mode, is_cross=is_cross,
+                 )
+                 + (1 - exp_ir) * self._get_eft_pkmu_pair(
+                     k, mu, params_a, params_b, nuisance, table_now, damping,
+                     cross_damping_mode=cross_damping_mode, is_cross=is_cross,
+                 ))
         return pkmu
 
     def get_rsd_pkell(self, kobs, qpar, qper, pars, table, table_now,
                       bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True,
-                      *, pars_b=None, cross_nuisance=None, bias_scheme_b=None):
+                      *, pars_b=None, cross_nuisance=None, bias_scheme_b=None,
+                      cross_damping_mode="single"):
         """
         Computes the redshift-space power spectrum multipoles P_ell(k).
 
@@ -1757,6 +1802,8 @@ class RSDMultipolesPowerSpectrumCalculator:
             pars_b (list, optional): Nuisance parameters for tracer B. If omitted, auto mode is used.
             cross_nuisance (list, optional): Pair-level EFT/stochastic parameters.
             bias_scheme_b (str, optional): Bias scheme for tracer B. Defaults to bias_scheme.
+            cross_damping_mode (str, optional): Cross FolpsD damping mode,
+                either "single" (default) or "geometric"; ignored in auto mode.
 
         Returns:
             array: Power spectrum multipoles for each ell.
@@ -1780,6 +1827,7 @@ class RSDMultipolesPowerSpectrumCalculator:
         pkmu = jac * self.get_rsd_pkmu(
             kap, muap, pars, table, table_now, IR_resummation, damping,
             pars_b=pars_b, cross_nuisance=cross_nuisance,
+            cross_damping_mode=cross_damping_mode,
         )
         return np.sum(pkmu * wmu[:, None, :], axis=-1)     
 

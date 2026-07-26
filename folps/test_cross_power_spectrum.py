@@ -31,6 +31,21 @@ def _assert_allclose(name, actual, expected, rtol, atol):
     print(f"[check] PASS {name}: max_abs={max_abs:.6e}, max_rel={max_rel:.6e}, rtol={rtol:.1e}, atol={atol:.1e}")
 
 
+def _assert_not_allclose(name, actual, expected, rtol, atol):
+    actual = host_np.asarray(actual)
+    expected = host_np.asarray(expected)
+    if host_np.allclose(actual, expected, rtol=rtol, atol=atol):
+        diff = host_np.abs(actual - expected)
+        rel = diff / host_np.maximum(host_np.abs(expected), 1.0e-300)
+        raise AssertionError(
+            f"{name} failed: arrays were unexpectedly close, "
+            f"max_abs={host_np.nanmax(diff):.6e}, max_rel={host_np.nanmax(rel):.6e}"
+        )
+    diff = host_np.abs(actual - expected)
+    rel = diff / host_np.maximum(host_np.abs(expected), 1.0e-300)
+    print(f"[check] PASS {name}: changed, max_abs={host_np.nanmax(diff):.6e}, max_rel={host_np.nanmax(rel):.6e}")
+
+
 def _assert_raises_value_error(name, func, message_parts):
     try:
         func()
@@ -132,6 +147,12 @@ def _make_params(xp, b1, b2, bs2, b3nl, nuisance=None):
     if nuisance is None:
         nuisance = (0.7, -1.3, 0.2, 0.0, 0.015, -0.45, 4800.0, 0.0)
     return xp.asarray([b1, b2, bs2, b3nl, *nuisance])
+
+
+def _with_x_fog(xp, pars, x_fog):
+    values = host_np.array(host_np.asarray(pars), dtype=host_np.float64)
+    values[-1] = x_fog
+    return xp.asarray(values)
 
 
 def _build_tables(root, backend, xp, kwargs, A_full):
@@ -345,6 +366,340 @@ def _check_synthetic_pair_contractions(multipoles, xp, table, A_full):
         check_row(name, row_idx, coefficient)
 
 
+def _check_cross_damping_modes(xp, A_full):
+    from folps import RSDMultipolesPowerSpectrumCalculator
+
+    multipoles = RSDMultipolesPowerSpectrumCalculator(model="FOLPSD")
+    k_eval = xp.asarray(host_np.array([0.055, 0.135, 0.215]))[:, None]
+    mu_eval = xp.asarray(host_np.array([0.30, 0.70, 0.95]))[None, :]
+    f0 = 0.6880638641959066
+    sigma2w = _row_like(xp, k_eval, 8.0)
+    loop_row = 9.0 + 1.7 * k_eval
+    table = _synthetic_interp_table(
+        xp,
+        k_eval,
+        A_full,
+        row_values={2: loop_row},
+        pkl=0.0,
+        Fkoverf0=0.0,
+        sigma2w=sigma2w,
+        f0=f0,
+    )
+    pars_a = _make_params(xp, 1.70, 0.0, 0.0, 0.0, nuisance=[0.0] * 7 + [0.65])
+    pars_b = _make_params(xp, 1.25, 0.0, 0.0, 0.0, nuisance=[0.0] * 7 + [2.10])
+    cross_nuisance = xp.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.35])
+    base_loop = pars_a[0] * pars_b[0] * loop_row
+
+    _assert_raises_value_error(
+        "invalid cross_damping_mode",
+        lambda: multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a,
+            table,
+            damping="lor",
+            pars_b=pars_b,
+            cross_nuisance=cross_nuisance,
+            cross_damping_mode="invalid",
+        ),
+        ["cross_damping_mode", "single", "geometric"],
+    )
+    _assert_raises_value_error(
+        "invalid FOLPSD cross damping name",
+        lambda: multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a,
+            table,
+            damping="gaussian",
+            pars_b=pars_b,
+            cross_nuisance=cross_nuisance,
+            cross_damping_mode="single",
+        ),
+        ["cross-spectrum damping", "exp", "lor", "vdg"],
+    )
+
+    no_damping_single = multipoles.get_eft_pkmu(
+        k_eval,
+        mu_eval,
+        pars_a,
+        table,
+        damping=None,
+        pars_b=pars_b,
+        cross_nuisance=cross_nuisance,
+        cross_damping_mode="single",
+    )
+    no_damping_geometric = multipoles.get_eft_pkmu(
+        k_eval,
+        mu_eval,
+        pars_a,
+        table,
+        damping=None,
+        pars_b=pars_b,
+        cross_nuisance=cross_nuisance,
+        cross_damping_mode="geometric",
+    )
+    _assert_allclose(
+        "FOLPSD cross damping=None mode independence",
+        no_damping_geometric,
+        no_damping_single,
+        rtol=1.0e-13,
+        atol=1.0e-10,
+    )
+
+    for damping in ("exp", "lor", "vdg"):
+        W_single = multipoles._pk_damping_factor(
+            k_eval, mu_eval, f0, sigma2w, cross_nuisance[-1], damping
+        )
+        single = multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a,
+            table,
+            damping=damping,
+            pars_b=pars_b,
+            cross_nuisance=cross_nuisance,
+            cross_damping_mode="single",
+        )
+        _assert_allclose(
+            f"{damping} single cross damping uses X_FoG_ab",
+            single,
+            W_single * base_loop,
+            rtol=1.0e-12,
+            atol=1.0e-10,
+        )
+
+        default_single = multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a,
+            table,
+            damping=damping,
+            pars_b=pars_b,
+            cross_nuisance=cross_nuisance,
+        )
+        _assert_allclose(
+            f"{damping} default cross_damping_mode is single",
+            default_single,
+            single,
+            rtol=1.0e-13,
+            atol=1.0e-10,
+        )
+
+        pars_a_alt = _with_x_fog(xp, pars_a, 4.30)
+        pars_b_alt = _with_x_fog(xp, pars_b, 0.20)
+        single_changed_tracer_x = multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a_alt,
+            table,
+            damping=damping,
+            pars_b=pars_b_alt,
+            cross_nuisance=cross_nuisance,
+            cross_damping_mode="single",
+        )
+        _assert_allclose(
+            f"{damping} single ignores tracer X_FoG values",
+            single_changed_tracer_x,
+            single,
+            rtol=1.0e-13,
+            atol=1.0e-10,
+        )
+
+        cross_nuisance_alt = xp.asarray([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.60])
+        single_changed_pair_x = multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a,
+            table,
+            damping=damping,
+            pars_b=pars_b,
+            cross_nuisance=cross_nuisance_alt,
+            cross_damping_mode="single",
+        )
+        _assert_not_allclose(
+            f"{damping} single responds to X_FoG_ab",
+            single_changed_pair_x,
+            single,
+            rtol=1.0e-6,
+            atol=1.0e-8,
+        )
+
+        W_a = multipoles._pk_damping_factor(k_eval, mu_eval, f0, sigma2w, pars_a[-1], damping)
+        W_b = multipoles._pk_damping_factor(k_eval, mu_eval, f0, sigma2w, pars_b[-1], damping)
+        geometric = multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a,
+            table,
+            damping=damping,
+            pars_b=pars_b,
+            cross_nuisance=cross_nuisance,
+            cross_damping_mode="geometric",
+        )
+        _assert_allclose(
+            f"{damping} geometric cross damping uses sqrt(W_A W_B)",
+            geometric,
+            xp.sqrt(W_a * W_b) * base_loop,
+            rtol=1.0e-12,
+            atol=1.0e-10,
+        )
+
+        geometric_changed_pair_x = multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a,
+            table,
+            damping=damping,
+            pars_b=pars_b,
+            cross_nuisance=cross_nuisance_alt,
+            cross_damping_mode="geometric",
+        )
+        _assert_allclose(
+            f"{damping} geometric ignores X_FoG_ab",
+            geometric_changed_pair_x,
+            geometric,
+            rtol=1.0e-13,
+            atol=1.0e-10,
+        )
+
+        geometric_changed_tracer_x = multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_a_alt,
+            table,
+            damping=damping,
+            pars_b=pars_b,
+            cross_nuisance=cross_nuisance,
+            cross_damping_mode="geometric",
+        )
+        _assert_not_allclose(
+            f"{damping} geometric responds to tracer X_FoG",
+            geometric_changed_tracer_x,
+            geometric,
+            rtol=1.0e-6,
+            atol=1.0e-8,
+        )
+
+        pars_equal_a = _with_x_fog(xp, pars_a, 1.80)
+        pars_equal_b = _with_x_fog(xp, pars_b, 1.80)
+        W_equal = multipoles._pk_damping_factor(k_eval, mu_eval, f0, sigma2w, 1.80, damping)
+        geometric_equal = multipoles.get_eft_pkmu(
+            k_eval,
+            mu_eval,
+            pars_equal_a,
+            table,
+            damping=damping,
+            pars_b=pars_equal_b,
+            cross_nuisance=cross_nuisance,
+            cross_damping_mode="geometric",
+        )
+        _assert_allclose(
+            f"{damping} geometric equal-X limit",
+            geometric_equal,
+            W_equal * base_loop,
+            rtol=1.0e-12,
+            atol=1.0e-10,
+        )
+
+
+def _check_folpsd_cross_damping_multipole_identities(xp, table, table_now):
+    from folps import RSDMultipolesPowerSpectrumCalculator
+
+    multipoles = RSDMultipolesPowerSpectrumCalculator(model="FOLPSD")
+    b1 = 1.645
+    pars_a = _make_params(
+        xp,
+        b1,
+        -0.46,
+        -4.0 / 7.0 * (b1 - 1.0),
+        32.0 / 315.0 * (b1 - 1.0),
+        nuisance=[0.7, -1.3, 0.2, 0.0, 0.015, -0.45, 4800.0, 1.25],
+    )
+    b1_b = 1.10
+    pars_b = _make_params(
+        xp,
+        b1_b,
+        0.23,
+        -4.0 / 7.0 * (b1_b - 1.0),
+        32.0 / 315.0 * (b1_b - 1.0),
+        nuisance=[0.2, -0.4, 0.1, 0.0, 0.0, 0.0, 3600.0, 2.80],
+    )
+    cross_nuisance = xp.asarray([0.4, -0.9, 0.15, 0.0, 0.01, -0.2, 3600.0, 1.90])
+    kobs = xp.asarray(host_np.array([0.025, 0.075, 0.14, 0.19]))
+
+    for damping in ("exp", "lor", "vdg"):
+        auto = multipoles.get_rsd_pkell(
+            kobs=kobs,
+            qpar=1.0,
+            qper=1.0,
+            pars=pars_a,
+            table=table,
+            table_now=table_now,
+            damping=damping,
+            nmu=8,
+            IR_resummation=True,
+        )
+        for mode in ("single", "geometric"):
+            cross_auto = multipoles.get_rsd_pkell(
+                kobs=kobs,
+                qpar=1.0,
+                qper=1.0,
+                pars=pars_a,
+                table=table,
+                table_now=table_now,
+                damping=damping,
+                nmu=8,
+                IR_resummation=True,
+                pars_b=pars_a,
+                cross_nuisance=pars_a[4:],
+                cross_damping_mode=mode,
+            )
+            _assert_allclose(
+                f"{damping} {mode} FOLPSD multipole auto limit",
+                cross_auto,
+                auto,
+                rtol=AUTO_RTOL,
+                atol=AUTO_ATOL,
+            )
+
+            pells_ab = multipoles.get_rsd_pkell(
+                kobs=kobs,
+                qpar=1.02,
+                qper=0.98,
+                pars=pars_a,
+                table=table,
+                table_now=table_now,
+                damping=damping,
+                nmu=8,
+                IR_resummation=True,
+                pars_b=pars_b,
+                cross_nuisance=cross_nuisance,
+                cross_damping_mode=mode,
+            )
+            pells_ba = multipoles.get_rsd_pkell(
+                kobs=kobs,
+                qpar=1.02,
+                qper=0.98,
+                pars=pars_b,
+                table=table,
+                table_now=table_now,
+                damping=damping,
+                nmu=8,
+                IR_resummation=True,
+                pars_b=pars_a,
+                cross_nuisance=cross_nuisance,
+                cross_damping_mode=mode,
+            )
+            _assert_allclose(
+                f"{damping} {mode} FOLPSD multipole exchange symmetry",
+                pells_ab,
+                pells_ba,
+                rtol=SYMM_RTOL,
+                atol=SYMM_ATOL,
+            )
+
+
 def _check_current_auto_regression(root, backend, xp, table, table_now):
     from folps import RSDMultipolesPowerSpectrumCalculator
 
@@ -500,6 +855,8 @@ def _run_backend_case(backend, outpath):
             _check_cross_parameter_validation(multipoles, xp, table, lrg, elg, A_full)
         _check_linear_limit(multipoles, xp, table, table_now, lrg, elg, xp.asarray([0.0] * 8), A_full)
         _check_synthetic_pair_contractions(multipoles, xp, table, A_full)
+        _check_cross_damping_modes(xp, A_full)
+        _check_folpsd_cross_damping_multipole_identities(xp, table, table_now)
 
         if A_full:
             _check_current_auto_regression(root, backend, xp, table, table_now)
