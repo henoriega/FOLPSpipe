@@ -6,6 +6,10 @@ redshift-space power-spectrum implementation on branch
 
 No commit or push was performed.
 
+Update: this review records the pre-damping Stage 2 state. The current branch
+now adds FolpsD cross damping through `cross_damping_mode="single"` and
+`"geometric"`; see `CROSS_POWER_IMPLEMENTATION.md` for the active API.
+
 ## Initial Repository Snapshot
 
 Commands requested before editing:
@@ -265,7 +269,7 @@ weakness for the requested sectors:
 
 ## Test Results
 
-All required commands were run from `/Users/waco/Desktop/FolpsX/FolpsD/folps`.
+All required commands were run from `<repo-root>/folps`.
 
 ```bash
 /opt/anaconda3/envs/aaenv/bin/python test_cross_power_spectrum.py
@@ -320,9 +324,9 @@ Power spectrum multipoles: 0.012 s
 Bispectrum multipoles:     0.009 s
 ```
 
-Warnings: Matplotlib could not write `/Users/waco/.matplotlib` and used a
-temporary cache under `/var/folders/...`; Fontconfig reported no writable cache
-directories. These warnings did not affect the exit status.
+Warnings: Matplotlib could not write to the default user cache and used a
+temporary cache directory; Fontconfig reported no writable cache directories.
+These warnings did not affect the exit status.
 
 ```bash
 /opt/anaconda3/envs/aaenv/bin/python test_folps_jax.py
@@ -394,7 +398,9 @@ Overall status: PASS
 
 ## Remaining Limitations
 
-- Cross spectra remain limited to `model="EFT"` and no cross-FoG damping model.
+- Historical Stage 2 limitation: cross spectra were limited to `model="EFT"`
+  with no cross-FoG damping model. This is superseded by the current FolpsD
+  cross damping implementation.
 - Direct `get_rsd_pkmu` and `get_eft_pkmu` cross calls require canonical FOLPS
   parameter ordering; only `get_rsd_pkell` applies `bias_scheme` and
   `bias_scheme_b`.

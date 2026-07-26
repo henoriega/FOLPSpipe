@@ -6,8 +6,8 @@ files were modified.
 
 ## 1. Repository and environment
 
-- Working directory checked: `/Users/waco/Desktop/FolpsX`.
-- Repository cloned into: `/Users/waco/Desktop/FolpsX/FolpsD`.
+- Working directory checked: the parent project directory.
+- Repository cloned into: `<repo-root>`.
 - Remote URL: `https://github.com/cosmodesi/FolpsD.git`.
 - Branch: `feature/cross-power-spectrum`.
 - Commit: `94ee3bfbbf85e0c679be73e1038ccfd9f8523434`.
@@ -34,8 +34,8 @@ Environment used for the audit after user guidance:
 - JAX: `0.7.2`.
 - jaxlib: `0.7.2`.
 - interpax: `0.3.12`.
-- Installed package: `folps 2.0.0`, editable location
-  `/Users/waco/Desktop/FolpsX/FolpsD` according to `pip show folps`.
+- Installed package: `folps 2.0.0`, editable location `<repo-root>`
+  according to `pip show folps`.
 
 Installation commands used:
 
@@ -46,8 +46,8 @@ git checkout main
 git pull --ff-only
 git checkout -b feature/cross-power-spectrum
 mkdir -p docs/cross_power
-cp /Users/waco/Desktop/folps_cross_power_theory_note.tex docs/cross_power/folps_cross_power_theory_note.tex
-cp /Users/waco/Desktop/folps_cross_power_theory_note.pdf docs/cross_power/folps_cross_power_theory_note.pdf
+cp <source-theory-note>.tex docs/cross_power/folps_cross_power_theory_note.tex
+cp <source-theory-note>.pdf docs/cross_power/folps_cross_power_theory_note.pdf
 /opt/anaconda3/envs/aaenv/bin/python -m pip install -r requirements.txt
 /opt/anaconda3/envs/aaenv/bin/python -m pip install -e .
 ```
@@ -77,20 +77,20 @@ Test commands and results:
 /opt/anaconda3/envs/aaenv/bin/python test_folps_numpy.py
 ```
 
-- Run from `/Users/waco/Desktop/FolpsX/FolpsD/folps`.
+- Run from `<repo-root>/folps`.
 - Result: PASS, exit code 0.
 - Output: loaded `output_matrices/matrices_nfftlog128_Afull-True_use_TNS-False.npy`;
   wrote finite NumPy result files.
 - Timings: matrix build 0.003 s, loop table 0.050 s, power spectrum 0.006 s,
   bispectrum 0.011 s.
 - Warnings: Matplotlib and fontconfig cache directories under the user home were
-  not writable, so Matplotlib created a temporary cache under `/var/folders/...`.
+  not writable, so Matplotlib created a temporary cache directory.
 
 ```bash
 /opt/anaconda3/envs/aaenv/bin/python test_folps_jax.py
 ```
 
-- Run from `/Users/waco/Desktop/FolpsX/FolpsD/folps`.
+- Run from `<repo-root>/folps`.
 - Result: PASS, exit code 0.
 - Output: JAX used CPU only; loaded the same A_full matrix file; wrote finite
   JAX result files.
@@ -103,7 +103,7 @@ Test commands and results:
 /opt/anaconda3/envs/aaenv/bin/python test_compare_folps_numpy_vs_jax.py --skip-run
 ```
 
-- Run from `/Users/waco/Desktop/FolpsX/FolpsD/folps`.
+- Run from `<repo-root>/folps`.
 - Result: PASS, exit code 0.
 - Default tolerances: `atol=5.00e-02`, `rtol=5.00e-03`.
 - Max differences:

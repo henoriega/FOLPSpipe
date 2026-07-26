@@ -33,6 +33,36 @@ pells_ab = multipoles.get_rsd_pkell(
 
 `pars_b=None` remains auto mode. `bias_scheme_b` may be supplied to
 `get_rsd_pkell`; otherwise tracer B uses the same bias scheme as tracer A.
+Cross spectra also support the existing FolpsD power-spectrum model name,
+`model="FOLPSD"`, with the existing `damping="exp"`, `"lor"`, and `"vdg"`
+choices:
+
+```python
+multipoles = RSDMultipolesPowerSpectrumCalculator(model="FOLPSD")
+
+pells_ab = multipoles.get_rsd_pkell(
+    kobs, qpar, qper, pars_a, table, table_now,
+    bias_scheme="priordoc",
+    bias_scheme_b="priordoc",
+    damping="vdg",
+    IR_resummation=True,
+    pars_b=pars_b,
+    cross_nuisance=cross_nuisance_ab,
+    cross_damping_mode="single",
+)
+```
+
+The public cross damping keyword is:
+
+```python
+cross_damping_mode="single"
+```
+
+Allowed values are `single` and `geometric`. The keyword affects only cross
+mode, i.e. calls with `pars_b is not None`; auto spectra retain their existing
+damping behavior. The default is `single`, so old cross calls that add FolpsD
+damping use the pair-level cross FoG parameter unless they explicitly opt into
+`geometric`.
 
 The implementation uses small internal `NamedTuple` containers:
 
@@ -48,6 +78,20 @@ are used by explicit convention. If `pars_b` is supplied and `cross_nuisance`
 is omitted, the call raises `ValueError`: pair-level EFT and stochastic
 parameters must be supplied explicitly for a cross-spectrum. They are not
 computed from either tracer's auto-spectrum nuisance values.
+
+For the current 12-element public parameter arrays, the cross damping parameter
+source is:
+
+| Mode | \(X_{\rm FoG}\) source |
+| --- | --- |
+| `single` | `cross_nuisance[-1]` |
+| `geometric` | `pars_a[-1]` and `pars_b[-1]` |
+
+In `single` mode the code evaluates the existing production damping function
+once, `W(k,mu; X_FoG_ab)`. In `geometric` mode it evaluates the same production
+function twice and forms `sqrt(W_A * W_B)`. `X_FoG_ab` remains present in the
+cross nuisance vector in geometric mode for API compatibility, but it is not
+used by the damping factor.
 
 ## Implemented Equations
 
@@ -141,6 +185,44 @@ P_ct,NLO = ctilde_ab (k mu f0)^4 sigma2w^2 P_K,AB
 P_stoch = PshotP_ab [alphashot0_ab + alphashot2_ab (k mu)^2].
 ```
 
+## FolpsD Damping Placement
+
+The current production auto expression was traced in `folps/folps.py`. In the
+non-marginalized path, `get_rsd_pkmu` assembles the IR-resummed linear Kaiser
+piece outside `_get_eft_pkmu_pair`. Inside `_get_eft_pkmu_pair`, the model
+damping factor multiplies `PloopSPTs_cross(mu)` only:
+
+```text
+P_pair =
+    W * P_loopSPT_pair
+  + P_stoch_pair
+  + P_ct_pair
+  + P_ct,NLO_pair
+```
+
+This follows directly from:
+
+```text
+PK = W * PloopSPTs_cross(mu) + Pshot(...)
+Winfty_all = False
+return PK + Pcts(...) + PctNLOs(...)
+```
+
+Therefore the current FolpsD convention used for both auto and cross spectra is:
+
+- the one-loop pair contraction, including the existing A/D/G structure in
+  `PloopSPTs_cross`, is damped;
+- the IR-resummed linear Kaiser term assembled by `get_rsd_pkmu` is not
+  multiplied by the phenomenological damping factor;
+- standard and NLO counterterms are not damped because the existing
+  `Winfty_all` flag is `False`;
+- stochastic terms are not damped.
+
+For `model="EFT"`, damping is ignored as before. For cross calls with
+`model="FOLPSD"` and `damping=None`, no phenomenological damping is applied, so
+`cross_damping_mode` has no numerical effect. Auto spectra keep the existing
+FolpsD fallback where omitted damping defaults to `"lor"`.
+
 ## Table Reuse
 
 No new FFTLog, IR, no-wiggle, or wiggle tables are introduced. The
@@ -166,10 +248,11 @@ This implementation is power-spectrum only and assumes one common effective
 redshift, common matter and velocity fields, no velocity bias, plane-parallel
 geometry, and even multipoles.
 
-Cross spectra with `pars_b` are currently restricted to `model="EFT"` and
-`damping=None`. Auto spectra keep the existing TNS/FolpsD damping behavior. No
-arithmetic-average, geometric-average, `sqrt(D_AA D_BB)`, or independent
-cross-FoG damping prescription is implemented.
+Cross spectra with `pars_b` are supported for `model="EFT"` and
+`model="FOLPSD"`. FolpsD cross damping is phenomenological and currently offers
+only the `single` and `geometric` nuisance prescriptions described above. No
+arithmetic-average, RMS-effective, or `sqrt(P_AA P_BB)` cross-spectrum
+replacement is implemented.
 
 The implementation does not add bispectrum cross-correlations, wide-angle
 terms, relativistic terms, odd multipoles, DESI data loading, or window
@@ -198,6 +281,12 @@ Relevant commands:
   velocity-velocity terms, `A`, full-`A`, `D`, and `G` responses;
 - AP-remapped multipole consistency with direct pkmu quadrature;
 - current auto-spectrum regression against existing backend artifacts;
+- FolpsD cross damping for `exp`, `lor`, and `vdg` in both `single` and
+  `geometric` modes;
+- default `cross_damping_mode="single"` behavior;
+- no-damping mode independence of `cross_damping_mode`;
+- full-multipole FolpsD auto-limit and exchange-symmetry checks for both
+  damping modes;
 - NumPy/JAX cross agreement with `rtol=5e-3`, `atol=5e-2`.
 
 ## Tutorial notebook
@@ -219,10 +308,11 @@ pars_b = [
 ]
 cross_nuisance_ab = [0.4, -0.9, 0.15, 0.0, 0.01, -0.2, 3600.0, 0.0]
 
-multipoles = RSDMultipolesPowerSpectrumCalculator(model="EFT")
+multipoles = RSDMultipolesPowerSpectrumCalculator(model="FOLPSD")
 p0_ab, p2_ab, p4_ab = multipoles.get_rsd_pkell(
     kobs, 1.0, 1.0, pars_a, table, table_now,
-    damping=None,
+    damping="vdg",
+    cross_damping_mode="single",
     IR_resummation=True,
     pars_b=pars_b,
     cross_nuisance=cross_nuisance_ab,
