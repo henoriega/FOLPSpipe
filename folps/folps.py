@@ -3175,20 +3175,34 @@ class BispectrumCalculator_fk:
 
         return (k1AP, k2AP, k3AP,x12AP, x23AP, x31AP,mu1AP, mu2AP, mu3AP,cosphi)
 
-    def Z2(self, ki, kj, xij, mui, muj, f0, fi, fj, b1, b2, bs,calA=1,calAp=0):
+    # def Z2(self, ki, kj, xij, mui, muj, f0, fi, fj, b1, b2, bs,calA=1,calAp=0):
 
-        term1 = b2/2 + bs/2 * (xij**2 - 1/3)
-        km=ki*mui + kj*muj
-        fij = (fi+fj)/2.0   #This should be f(|ki+kj|)
-        term2 = km/2 * fij * (mui/ki *  (b1 + fj * muj**2) +
-                              muj/kj *  (b1 + fi * mui**2) )
-        F2 = 5/7 + xij/2 * (ki/kj + kj/ki) + 2/7 * xij**2
-        # G2e = 3/7 + xij/2 * (fi/f0*ki/kj + fj/f0*kj/ki) + 4/7 * xij**2
-        G2 = (3*(fi+fj)*calA + 3*calAp)/(14*f0) + xij/2 * (fi/f0*ki/kj + fj/f0*kj/ki) + xij**2 * ( (fi+fj)*calA/(2*f0) - (3*(fi+fj)*calA + 3*calAp)/(14*f0) )
+    #     term1 = b2/2 + bs/2 * (xij**2 - 1/3)
+    #     km=ki*mui + kj*muj
+    #     fij = (fi+fj)/2.0   #This should be f(|ki+kj|)
+    #     term2 = km/2 * fij * (mui/ki *  (b1 + fj * muj**2) +
+    #                           muj/kj *  (b1 + fi * mui**2) )
+    #     F2 = 5/7 + xij/2 * (ki/kj + kj/ki) + 2/7 * xij**2
+    #     # G2e = 3/7 + xij/2 * (fi/f0*ki/kj + fj/f0*kj/ki) + 4/7 * xij**2
+    #     G2 = (3*(fi+fj)*calA + 3*calAp)/(14*f0) + xij/2 * (fi/f0*ki/kj + fj/f0*kj/ki) + xij**2 * ( (fi+fj)*calA/(2*f0) - (3*(fi+fj)*calA + 3*calAp)/(14*f0) )
+    #     term3 = b1 * F2
+    #     mu2 = km**2 / (ki**2 + kj**2 + 2 * ki * kj * xij)
+    #     term4 = fij * mu2 * G2
+
+    #     return term1 + term2 + term3 + term4
+
+    def Z2(self, ki, kj, xij, mui, muj, f0, fi, fj, b1, b2, bs, calA=1., calAp=0.):
+
+        term1 = b2 / 2. + bs / 2. * (xij**2 - 1. / 3.)
+        km = ki * mui + kj * muj
+        fij = (fi + fj) / 2.0  # This should be f(|ki+kj|)
+        term2 = km / 2. * fij * (mui / ki * (b1 + fj * muj**2) + muj / kj * (b1 + fi * mui**2))
+        F2 = 1. / 2. + 3. * calA / 14. + xij / 2. * (ki / kj + kj / ki) + (1. / 2. - 3. * calA / 14.) * xij**2
+        G2 = (3. * calA * (fi + fj) + 3. * calAp) / (14. * f0) + xij / 2. * (fi / f0 * ki / kj + fj / f0 * kj / ki) + ((fi + fj) / (2. * f0) - (3. * calA * (fi + fj) + 3. * calAp) / (14. * f0)) * xij**2
         term3 = b1 * F2
-        mu2 = km**2 / (ki**2 + kj**2 + 2 * ki * kj * xij)
+        mu2 = km**2 / (ki**2 + kj**2 + 2. * ki * kj * xij)
         term4 = fij * mu2 * G2
-
+    
         return term1 + term2 + term3 + term4
 
 
