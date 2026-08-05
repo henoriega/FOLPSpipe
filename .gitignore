@@ -1,4 +1,7 @@
 folps/mike_data_tools.py
-*.egg-info
-*.DS_Store
+*/*.egg-info
+**/*.DS_Store
+**/*.ipynb*
+**/*_build
+**/__pycache__
 
