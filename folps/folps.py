@@ -2544,12 +2544,21 @@ class BispectrumCalculator:
         b112 = (
             3 * np.sqrt(2.5) * (
                 np.sqrt(3) * (-1 + 3 * mu**2) * x
-                + 6 * mu * np.sqrt(1 - mu**2)
-                * np.sqrt(1 - x**2) * np.cos(phi)
+                + 3 * np.sqrt(3) * mu * np.sqrt(1 - mu**2)
+                * np.sqrt(1 - x**2) * cosphi
             )
         ) / (8 * Pi)
 
-        return b000, b110, b220, b202, b022, b112
+        b222 = (
+            25 * np.sqrt(70) * (
+                1 - 3 * mu**2 * x**2
+                - 3 * mu * x * np.sqrt(1 - mu**2)
+                * np.sqrt(1 - x**2) * cosphi
+                - 1.5 * (1 - mu**2) * (1 - x**2) * (1 - cos2phi)
+            )
+        ) / (112 * Pi)
+
+        return b000, b110, b220, b202, b022, b112, b222
 
     def _compute_single_integrand(self, multipole, x, mu, phi, cosphi, cos2phi):
         """
@@ -2595,13 +2604,29 @@ class BispectrumCalculator:
             ) / (32 * Pi)
 
         elif multipole == 'B112':
+            # The cos(phi) coefficient is 3*sqrt(3), not 6: with mu2 = mu*x + sqrt(1-mu^2)
+            # sqrt(1-x^2) cos(phi) the bracket is sqrt(3) * (3 mu mu2 - x), which is the
+            # only form symmetric under k1 <-> k2, as (1 1 L) with even L must be.
             return (
                 3 * np.sqrt(2.5) * (
                     np.sqrt(3) * (-1 + 3 * mu**2) * x
-                    + 6 * mu * np.sqrt(1 - mu**2)
+                    + 3 * np.sqrt(3) * mu * np.sqrt(1 - mu**2)
                     * np.sqrt(1 - x**2) * cosphi
                 )
             ) / (8 * Pi)
+
+        elif multipole == 'B222':
+            # 125/(8 pi) * S_222; equals 25 sqrt(70)/(112 pi) *
+            # [1 - 3 mu^2 x^2 - 3 mu x sqrt(1-mu^2) sqrt(1-x^2) cos(phi)
+            #    - (3/2) (1-mu^2)(1-x^2) (1 - cos(2 phi))]
+            return (
+                25 * np.sqrt(70) * (
+                    1 - 3 * mu**2 * x**2
+                    - 3 * mu * x * np.sqrt(1 - mu**2)
+                    * np.sqrt(1 - x**2) * cosphi
+                    - 1.5 * (1 - mu**2) * (1 - x**2) * (1 - cos2phi)
+                )
+            ) / (112 * Pi)
 
         else:
             raise ValueError(f"Unknown multipole: {multipole}")
@@ -2673,7 +2698,8 @@ class BispectrumCalculator:
             'B220': 1 / np.sqrt(5),
             'B202': 1 / np.sqrt(5),
             'B022': 1 / np.sqrt(5),
-            'B112': np.sqrt(2 / 15)
+            'B112': np.sqrt(2 / 15),
+            'B222': -2 / np.sqrt(70)
         }
 
         # Compute only the requested multipoles (saves computation time)
@@ -2744,7 +2770,7 @@ class BispectrumCalculator:
                 Otherwise, arrays have shape (N,) where N = len(k1k2pairs)
         """
         # Validate requested multipoles
-        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112']
+        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112', 'B222']
         for mp in multipoles:
             if mp not in all_multipoles:
                 raise ValueError(f"Invalid multipole '{mp}'. Available: {all_multipoles}")
@@ -2792,7 +2818,8 @@ class BispectrumCalculator:
             'B220': 1 / np.sqrt(5),
             'B202': 1 / np.sqrt(5),
             'B022': 1 / np.sqrt(5),
-            'B112': np.sqrt(2 / 15)
+            'B112': np.sqrt(2 / 15),
+            'B222': -2 / np.sqrt(70)
         }
 
         # Compute only the requested multipoles (saves computation time)
@@ -3450,12 +3477,21 @@ class BispectrumCalculator_fk:
         b112 = (
             3 * np.sqrt(2.5) * (
                 np.sqrt(3) * (-1 + 3 * mu**2) * x
-                + 6 * mu * np.sqrt(1 - mu**2)
-                * np.sqrt(1 - x**2) * np.cos(phi)
+                + 3 * np.sqrt(3) * mu * np.sqrt(1 - mu**2)
+                * np.sqrt(1 - x**2) * cosphi
             )
         ) / (8 * Pi)
 
-        return b000, b110, b220, b202, b022, b112
+        b222 = (
+            25 * np.sqrt(70) * (
+                1 - 3 * mu**2 * x**2
+                - 3 * mu * x * np.sqrt(1 - mu**2)
+                * np.sqrt(1 - x**2) * cosphi
+                - 1.5 * (1 - mu**2) * (1 - x**2) * (1 - cos2phi)
+            )
+        ) / (112 * Pi)
+
+        return b000, b110, b220, b202, b022, b112, b222
 
     def _compute_single_integrand(self, multipole, x, mu, phi, cosphi, cos2phi):
         """
@@ -3501,13 +3537,29 @@ class BispectrumCalculator_fk:
             ) / (32 * Pi)
 
         elif multipole == 'B112':
+            # The cos(phi) coefficient is 3*sqrt(3), not 6: with mu2 = mu*x + sqrt(1-mu^2)
+            # sqrt(1-x^2) cos(phi) the bracket is sqrt(3) * (3 mu mu2 - x), which is the
+            # only form symmetric under k1 <-> k2, as (1 1 L) with even L must be.
             return (
                 3 * np.sqrt(2.5) * (
                     np.sqrt(3) * (-1 + 3 * mu**2) * x
-                    + 6 * mu * np.sqrt(1 - mu**2)
+                    + 3 * np.sqrt(3) * mu * np.sqrt(1 - mu**2)
                     * np.sqrt(1 - x**2) * cosphi
                 )
             ) / (8 * Pi)
+
+        elif multipole == 'B222':
+            # 125/(8 pi) * S_222; equals 25 sqrt(70)/(112 pi) *
+            # [1 - 3 mu^2 x^2 - 3 mu x sqrt(1-mu^2) sqrt(1-x^2) cos(phi)
+            #    - (3/2) (1-mu^2)(1-x^2) (1 - cos(2 phi))]
+            return (
+                25 * np.sqrt(70) * (
+                    1 - 3 * mu**2 * x**2
+                    - 3 * mu * x * np.sqrt(1 - mu**2)
+                    * np.sqrt(1 - x**2) * cosphi
+                    - 1.5 * (1 - mu**2) * (1 - x**2) * (1 - cos2phi)
+                )
+            ) / (112 * Pi)
 
         else:
             raise ValueError(f"Unknown multipole: {multipole}")
@@ -3579,7 +3631,8 @@ class BispectrumCalculator_fk:
             'B220': 1 / np.sqrt(5),
             'B202': 1 / np.sqrt(5),
             'B022': 1 / np.sqrt(5),
-            'B112': np.sqrt(2 / 15)
+            'B112': np.sqrt(2 / 15),
+            'B222': -2 / np.sqrt(70)
         }
 
         # Compute only the requested multipoles (saves computation time)
@@ -3650,7 +3703,7 @@ class BispectrumCalculator_fk:
                 Otherwise, arrays have shape (N,) where N = len(k1k2pairs)
         """
         # Validate requested multipoles
-        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112']
+        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112', 'B222']
         for mp in multipoles:
             if mp not in all_multipoles:
                 raise ValueError(f"Invalid multipole '{mp}'. Available: {all_multipoles}")
@@ -3698,7 +3751,8 @@ class BispectrumCalculator_fk:
             'B220': 1 / np.sqrt(5),
             'B202': 1 / np.sqrt(5),
             'B022': 1 / np.sqrt(5),
-            'B112': np.sqrt(2 / 15)
+            'B112': np.sqrt(2 / 15),
+            'B222': -2 / np.sqrt(70)
         }
 
         # Compute only the requested multipoles (saves computation time)
