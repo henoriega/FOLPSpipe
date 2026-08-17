@@ -1397,6 +1397,22 @@ def _normalize_damping_method(damping_method):
     return damping_method
 
 
+def _resolve_use_gtns(use_GTNS, damping_method):
+    """Resolve the GTNS switch to a bool; see :meth:`RSDMultipolesPowerSpectrumCalculator.get_eft_pkmu`.
+
+    ``use_GTNS=None`` (the default) reproduces the ``damping_method``-driven behavior: GTNS is
+    kept for ``'loop+ctr'`` (where the tree-level Kaiser term is undamped, so nothing resums
+    it) and dropped for every ``'tree+...'`` method (where the tree-level damping resums it
+    non-perturbatively, so keeping it would double count at O(lambda^2)).  ``True`` / ``False``
+    force it on / off, whatever ``damping_method`` says.
+    """
+    if use_GTNS is None:
+        return not damping_method.startswith('tree')
+    if use_GTNS not in (True, False):
+        raise ValueError(f'use_GTNS must be None, True or False, got {use_GTNS!r}')
+    return bool(use_GTNS)
+
+
 class RSDMultipolesPowerSpectrumCalculator:
     """
     A class to calculate the redshift space power spectrum multipoles with flexible bias schemes.
@@ -1507,19 +1523,28 @@ class RSDMultipolesPowerSpectrumCalculator:
         F = qpar / qper
         return (muobs / F) * (1 + muobs**2 * (1 / F**2 - 1))**-0.5
 
-    def get_eft_pkmu(self, kev, mu, pars, table, damping='lor', damping_method=None):
+    def get_eft_pkmu(self, kev, mu, pars, table, damping='lor', damping_method=None, use_GTNS=None):
         """Calculate the EFT galaxy power spectrum in redshift space.
 
         damping_method: which terms the FoG damping kernel multiplies (the tree-level Kaiser
-        term itself is handled in get_rsd_pkmu; here it only controls GTNS and the ctr/sn
-        factors). 'tree+loop' damps the tree-level Kaiser term and the loop bracket only;
-        'tree+loop+ctr' (default; None is an alias) additionally the counterterms;
-        'tree+loop+ctr+sn' (alias 'all') additionally the shot noise. All options remove
-        the GTNS term from the damped loop bracket, since the tree-level damping resums
-        it non-perturbatively (avoids O(lambda^2) double counting).
+        term itself is handled in get_rsd_pkmu; here it only controls the ctr/sn factors and,
+        through use_GTNS=None, the GTNS default). 'tree+loop' damps the tree-level Kaiser term
+        and the loop bracket only; 'tree+loop+ctr' (default; None is an alias) additionally the
+        counterterms; 'tree+loop+ctr+sn' (alias 'all') additionally the shot noise.
         Legacy 'tree'/'tree-gtns' are deprecated and raise (use 'tree+loop+ctr').
+
+        use_GTNS: whether to keep GTNS = -(k mu f0)^2 sigma2w * P_Kaiser, the perturbative FoG
+        suppression of the tree-level spectrum, inside the damped loop bracket.
+        None (default) follows damping_method: kept for 'loop+ctr', dropped for every
+        'tree+...' method, since damping the tree level resums GTNS non-perturbatively and
+        keeping both would double count at O(lambda^2). True / False override that. In
+        particular damping_method='tree+loop+ctr' with use_GTNS=True is the (double-counting)
+        convention used by comet's VDG_infty, which multiplies the full PT spectrum -- its own
+        perturbative sigma_v^2 terms included -- by W_infty.
+        The TNS model handles the FoG term itself and never adds GTNS, whatever use_GTNS says.
         """
         damping_method = _normalize_damping_method(damping_method)
+        _resolve_use_gtns(use_GTNS, damping_method)  # validate early, even if the model overrides below
         (b1, b2, bs2, b3nl, alpha0, alpha2, alpha4, ctilde, alphashot0, alphashot2, PshotP, X_FoG_p) = pars
 
         if A_full_status:
@@ -1575,8 +1600,9 @@ class RSDMultipolesPowerSpectrumCalculator:
             return b1**4 * Df(mu, f0 / b1)
 
         def GTNS(mu, b1):
-            # Tree-damping methods: the tree-level damping (get_rsd_pkmu) resums this term non-perturbatively.
-            if use_TNS_model_status or damping_method.startswith('tree'):
+            # _use_gtns is bound below, after the model dispatch may have overridden damping_method;
+            # this closure only runs from PloopSPTs, which is called after that point.
+            if use_TNS_model_status or not _use_gtns:
                 return 0
             else:
                 return -((kev * mu * f0)**2 * sigma2w * (b1**2 * pkl + 2 * b1 * f0 * mu**2 * Pdt_L + f0**2 * mu**4 * Ptt_L))
@@ -1628,6 +1654,8 @@ class RSDMultipolesPowerSpectrumCalculator:
             if damping is None:
                 print("[FOLPS] For FOLPSD you must specify a damping ('exp', 'lor', 'vdg'). Default: 'lor'.")
                 damping = 'lor'
+        # Resolved here, not at the top: the model dispatch above may have overridden damping_method.
+        _use_gtns = _resolve_use_gtns(use_GTNS, damping_method)
         W = fog_damping((kev * mu, X_FoG_p), (kev * mu, X_FoG_p), f=f0, sigma2v=sigma2w, damping=damping)
         # Which terms the kernel multiplies: loop bracket always; ctr/sn if named in damping_method.
         W_ctr = 1. if 'ctr' not in damping_method else W
@@ -1637,16 +1665,20 @@ class RSDMultipolesPowerSpectrumCalculator:
 
         return PK + W_ctr * (Pcts(mu, alpha0, alpha2, alpha4) + PctNLOs(mu, b1, ctilde))
 
-    def get_rsd_pkmu(self, k, mu, pars, table, table_now, IR_resummation=True, damping='lor', damping_method=None):
+    def get_rsd_pkmu(self, k, mu, pars, table, table_now, IR_resummation=True, damping='lor',
+                     damping_method=None, use_GTNS=None):
         """Return redshift space P(k, mu) given input tables.
 
         damping_method: which terms the FoG damping kernel multiplies. 'tree+loop' damps
         the tree-level Kaiser term and the loop bracket only; 'tree+loop+ctr' (default;
         None is an alias) additionally the counterterms; 'tree+loop+ctr+sn' (alias 'all')
-        additionally the shot noise. All options remove the GTNS term from the damped
-        loop bracket (double-counting-free: the tree-level damping resums it
-        non-perturbatively). Legacy 'tree'/'tree-gtns' are deprecated and raise (use
+        additionally the shot noise. Legacy 'tree'/'tree-gtns' are deprecated and raise (use
         'tree+loop+ctr'). The EFT model ignores damping_method (no damping, GTNS kept).
+
+        use_GTNS: whether to keep the perturbative GTNS term; None (default) follows
+        damping_method (kept for 'loop+ctr', dropped for 'tree+...'), True / False override it.
+        See :meth:`get_eft_pkmu`. Note use_GTNS is orthogonal to the tree-level damping, so
+        damping_method='tree+loop+ctr' with use_GTNS=True damps the tree *and* keeps GTNS.
         """
         damping_method = _normalize_damping_method(damping_method)
         if self.model == "EFT":
@@ -1674,12 +1706,13 @@ class RSDMultipolesPowerSpectrumCalculator:
         else:
             sigma2t = 0
         pkmu = (W_tree * (b1 + fk * mu**2)**2 * (pkl_now + np.exp(-k**2 * sigma2t)*(pkl - pkl_now)*(1 + k**2 * sigma2t))
-                 + np.exp(-k**2 * sigma2t) * self.get_eft_pkmu(k, mu, pars, table, damping, damping_method=damping_method)
-                 + (1 - np.exp(-k**2 * sigma2t)) * self.get_eft_pkmu(k, mu, pars, table_now, damping, damping_method=damping_method))
+                 + np.exp(-k**2 * sigma2t) * self.get_eft_pkmu(k, mu, pars, table, damping, damping_method=damping_method, use_GTNS=use_GTNS)
+                 + (1 - np.exp(-k**2 * sigma2t)) * self.get_eft_pkmu(k, mu, pars, table_now, damping, damping_method=damping_method, use_GTNS=use_GTNS))
         return pkmu
 
     def get_rsd_pkell(self, kobs, qpar, qper, pars, table, table_now,
-                      bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True):
+                      bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True,
+                      damping_method=None, use_GTNS=None):
         """
         Computes the redshift-space power spectrum multipoles P_ell(k).
 
@@ -1694,6 +1727,8 @@ class RSDMultipolesPowerSpectrumCalculator:
             nmu (int): Number of points for GL integration
             ells (tuple): Multipoles
             IR_resummation (bool): Whether to apply IR resummation.
+            damping_method (str): Which terms the FoG kernel multiplies; see :meth:`get_rsd_pkmu`.
+            use_GTNS (bool): Whether to keep the perturbative GTNS term; see :meth:`get_eft_pkmu`.
 
         Returns:
             array: Power spectrum multipoles for each ell.
@@ -1712,7 +1747,8 @@ class RSDMultipolesPowerSpectrumCalculator:
         wmu = np.array([wmu * (2 * ell + 1) * legendre(ell)(muobs) for ell in ells])
         jac, kap, muap = (qpar * qper**2)**(-1), self.k_ap(kobs[:, None], muobs, qpar, qper), self.mu_ap(muobs, qpar, qper)[None, :]
         #print(muap[0])
-        pkmu = jac * self.get_rsd_pkmu(kap, muap, pars, table, table_now, IR_resummation, damping)
+        pkmu = jac * self.get_rsd_pkmu(kap, muap, pars, table, table_now, IR_resummation, damping,
+                                       damping_method=damping_method, use_GTNS=use_GTNS)
         return np.sum(pkmu * wmu[:, None, :], axis=-1)
 
 
@@ -1758,7 +1794,8 @@ def get_rsd_pkell_marg_const(
             sigma2t = 0.0
 
         # Compute pkmu. The tree-level Kaiser term below is undamped and the analytic
-        # derivatives assume the original FOLPSD convention: pin damping_method='loop+ctr'.
+        # derivatives assume the original FOLPSD convention: pin damping_method='loop+ctr'
+        # (hence use_GTNS=None -> GTNS kept). This path does not honour a use_GTNS override.
         pkmu = (
             (b1 + fk * mu**2)**2 * (pkl_now + np.exp(-k**2 * sigma2t) * (pkl - pkl_now) * (1 + k**2 * sigma2t))
             + np.exp(-k**2 * sigma2t) * multipoles.get_eft_pkmu(k, mu, pars_const, table_interp, damping, damping_method='loop+ctr')
@@ -2507,12 +2544,21 @@ class BispectrumCalculator:
         b112 = (
             3 * np.sqrt(2.5) * (
                 np.sqrt(3) * (-1 + 3 * mu**2) * x
-                + 6 * mu * np.sqrt(1 - mu**2)
-                * np.sqrt(1 - x**2) * np.cos(phi)
+                + 3 * np.sqrt(3) * mu * np.sqrt(1 - mu**2)
+                * np.sqrt(1 - x**2) * cosphi
             )
         ) / (8 * Pi)
 
-        return b000, b110, b220, b202, b022, b112
+        b222 = (
+            25 * np.sqrt(70) * (
+                1 - 3 * mu**2 * x**2
+                - 3 * mu * x * np.sqrt(1 - mu**2)
+                * np.sqrt(1 - x**2) * cosphi
+                - 1.5 * (1 - mu**2) * (1 - x**2) * (1 - cos2phi)
+            )
+        ) / (112 * Pi)
+
+        return b000, b110, b220, b202, b022, b112, b222
 
     def _compute_single_integrand(self, multipole, x, mu, phi, cosphi, cos2phi):
         """
@@ -2558,13 +2604,29 @@ class BispectrumCalculator:
             ) / (32 * Pi)
 
         elif multipole == 'B112':
+            # The cos(phi) coefficient is 3*sqrt(3), not 6: with mu2 = mu*x + sqrt(1-mu^2)
+            # sqrt(1-x^2) cos(phi) the bracket is sqrt(3) * (3 mu mu2 - x), which is the
+            # only form symmetric under k1 <-> k2, as (1 1 L) with even L must be.
             return (
                 3 * np.sqrt(2.5) * (
                     np.sqrt(3) * (-1 + 3 * mu**2) * x
-                    + 6 * mu * np.sqrt(1 - mu**2)
+                    + 3 * np.sqrt(3) * mu * np.sqrt(1 - mu**2)
                     * np.sqrt(1 - x**2) * cosphi
                 )
             ) / (8 * Pi)
+
+        elif multipole == 'B222':
+            # 125/(8 pi) * S_222; equals 25 sqrt(70)/(112 pi) *
+            # [1 - 3 mu^2 x^2 - 3 mu x sqrt(1-mu^2) sqrt(1-x^2) cos(phi)
+            #    - (3/2) (1-mu^2)(1-x^2) (1 - cos(2 phi))]
+            return (
+                25 * np.sqrt(70) * (
+                    1 - 3 * mu**2 * x**2
+                    - 3 * mu * x * np.sqrt(1 - mu**2)
+                    * np.sqrt(1 - x**2) * cosphi
+                    - 1.5 * (1 - mu**2) * (1 - x**2) * (1 - cos2phi)
+                )
+            ) / (112 * Pi)
 
         else:
             raise ValueError(f"Unknown multipole: {multipole}")
@@ -2636,7 +2698,8 @@ class BispectrumCalculator:
             'B220': 1 / np.sqrt(5),
             'B202': 1 / np.sqrt(5),
             'B022': 1 / np.sqrt(5),
-            'B112': np.sqrt(2 / 15)
+            'B112': np.sqrt(2 / 15),
+            'B222': -2 / np.sqrt(70)
         }
 
         # Compute only the requested multipoles (saves computation time)
@@ -2707,7 +2770,7 @@ class BispectrumCalculator:
                 Otherwise, arrays have shape (N,) where N = len(k1k2pairs)
         """
         # Validate requested multipoles
-        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112']
+        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112', 'B222']
         for mp in multipoles:
             if mp not in all_multipoles:
                 raise ValueError(f"Invalid multipole '{mp}'. Available: {all_multipoles}")
@@ -2755,7 +2818,8 @@ class BispectrumCalculator:
             'B220': 1 / np.sqrt(5),
             'B202': 1 / np.sqrt(5),
             'B022': 1 / np.sqrt(5),
-            'B112': np.sqrt(2 / 15)
+            'B112': np.sqrt(2 / 15),
+            'B222': -2 / np.sqrt(70)
         }
 
         # Compute only the requested multipoles (saves computation time)
@@ -3413,12 +3477,21 @@ class BispectrumCalculator_fk:
         b112 = (
             3 * np.sqrt(2.5) * (
                 np.sqrt(3) * (-1 + 3 * mu**2) * x
-                + 6 * mu * np.sqrt(1 - mu**2)
-                * np.sqrt(1 - x**2) * np.cos(phi)
+                + 3 * np.sqrt(3) * mu * np.sqrt(1 - mu**2)
+                * np.sqrt(1 - x**2) * cosphi
             )
         ) / (8 * Pi)
 
-        return b000, b110, b220, b202, b022, b112
+        b222 = (
+            25 * np.sqrt(70) * (
+                1 - 3 * mu**2 * x**2
+                - 3 * mu * x * np.sqrt(1 - mu**2)
+                * np.sqrt(1 - x**2) * cosphi
+                - 1.5 * (1 - mu**2) * (1 - x**2) * (1 - cos2phi)
+            )
+        ) / (112 * Pi)
+
+        return b000, b110, b220, b202, b022, b112, b222
 
     def _compute_single_integrand(self, multipole, x, mu, phi, cosphi, cos2phi):
         """
@@ -3464,13 +3537,29 @@ class BispectrumCalculator_fk:
             ) / (32 * Pi)
 
         elif multipole == 'B112':
+            # The cos(phi) coefficient is 3*sqrt(3), not 6: with mu2 = mu*x + sqrt(1-mu^2)
+            # sqrt(1-x^2) cos(phi) the bracket is sqrt(3) * (3 mu mu2 - x), which is the
+            # only form symmetric under k1 <-> k2, as (1 1 L) with even L must be.
             return (
                 3 * np.sqrt(2.5) * (
                     np.sqrt(3) * (-1 + 3 * mu**2) * x
-                    + 6 * mu * np.sqrt(1 - mu**2)
+                    + 3 * np.sqrt(3) * mu * np.sqrt(1 - mu**2)
                     * np.sqrt(1 - x**2) * cosphi
                 )
             ) / (8 * Pi)
+
+        elif multipole == 'B222':
+            # 125/(8 pi) * S_222; equals 25 sqrt(70)/(112 pi) *
+            # [1 - 3 mu^2 x^2 - 3 mu x sqrt(1-mu^2) sqrt(1-x^2) cos(phi)
+            #    - (3/2) (1-mu^2)(1-x^2) (1 - cos(2 phi))]
+            return (
+                25 * np.sqrt(70) * (
+                    1 - 3 * mu**2 * x**2
+                    - 3 * mu * x * np.sqrt(1 - mu**2)
+                    * np.sqrt(1 - x**2) * cosphi
+                    - 1.5 * (1 - mu**2) * (1 - x**2) * (1 - cos2phi)
+                )
+            ) / (112 * Pi)
 
         else:
             raise ValueError(f"Unknown multipole: {multipole}")
@@ -3542,7 +3631,8 @@ class BispectrumCalculator_fk:
             'B220': 1 / np.sqrt(5),
             'B202': 1 / np.sqrt(5),
             'B022': 1 / np.sqrt(5),
-            'B112': np.sqrt(2 / 15)
+            'B112': np.sqrt(2 / 15),
+            'B222': -2 / np.sqrt(70)
         }
 
         # Compute only the requested multipoles (saves computation time)
@@ -3613,7 +3703,7 @@ class BispectrumCalculator_fk:
                 Otherwise, arrays have shape (N,) where N = len(k1k2pairs)
         """
         # Validate requested multipoles
-        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112']
+        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112', 'B222']
         for mp in multipoles:
             if mp not in all_multipoles:
                 raise ValueError(f"Invalid multipole '{mp}'. Available: {all_multipoles}")
@@ -3661,7 +3751,8 @@ class BispectrumCalculator_fk:
             'B220': 1 / np.sqrt(5),
             'B202': 1 / np.sqrt(5),
             'B022': 1 / np.sqrt(5),
-            'B112': np.sqrt(2 / 15)
+            'B112': np.sqrt(2 / 15),
+            'B222': -2 / np.sqrt(70)
         }
 
         # Compute only the requested multipoles (saves computation time)
