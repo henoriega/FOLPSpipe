@@ -1341,76 +1341,13 @@ class NonLinearPowerSpectrumCalculator:
         return {"k": self.kTout,"pk_l": pk_l,"pk_l_NW": pk_l_NW,"f_k": fk,"f0": self.f0}
 
 
-def fog_damping(*kmu_X, f=1., sigma2v=1., damping='lor'):
-    r"""
-    Finger-of-God damping kernel W, following jaxpower's pt.py convention.
-
-    Parameters
-    ----------
-    kmu_X : tuples
-        One ``(k * mu, X_FoG)`` pair per power spectrum leg: two (identical) pairs
-        for the auto power spectrum, three for the bispectrum.
-    f : float
-        Growth rate :math:`f_0` (each ``k * mu`` is multiplied by ``f``).
-    sigma2v : float
-        Velocity dispersion :math:`\sigma_v^2`.
-    damping : {None, 'exp', 'lor', 'vdg'}
-        ``None`` returns 1 (no damping).
-
-    Notes
-    -----
-    With :math:`\lambda_X^2 = \frac{f^2}{2} \sum_i (k_i \mu_i X_i)^2` and
-    :math:`\lambda^2 = \frac{f^2}{2} \sum_i (k_i \mu_i)^2`:
-    'exp' returns :math:`e^{-\lambda_X^2 \sigma_v^2}`, 'lor' returns
-    :math:`1 / (1 + \lambda_X^2 \sigma_v^2)`, and 'vdg' returns
-    :math:`e^{-\lambda^2 \sigma_v^2 / (1 + \lambda_X^2)} / (1 + \lambda_X^2)^{n - 3/2}`
-    with :math:`n` the number of legs (1/2 for the power spectrum, 3/2 for the bispectrum).
-    """
-    if damping is None:
-        return 1.
-    lX2 = 0.5 * f**2 * sum((kmu * X)**2 for kmu, X in kmu_X)
-    if damping == 'lor':
-        return 1. / (1. + lX2 * sigma2v)
-    if damping == 'exp':
-        return np.exp(-lX2 * sigma2v)
-    if damping == 'vdg':
-        l2 = 0.5 * f**2 * sum(kmu**2 for kmu, _ in kmu_X)
-        denom = 1. + lX2
-        return np.exp(-l2 * sigma2v / denom) / denom**(len(kmu_X) - 1.5)
-    raise ValueError(f"damping must be None, 'exp', 'lor' or 'vdg', got {damping!r}")
-
-
-def _normalize_damping_method(damping_method):
-    """Normalize / validate ``damping_method``; see :meth:`RSDMultipolesPowerSpectrumCalculator.get_rsd_pkmu`.
-
-    ``None`` (the default) is an alias for ``'tree+loop+ctr'``, ``'all'`` for
-    ``'tree+loop+ctr+sn'``; legacy ``'tree'`` and ``'tree-gtns'`` are deprecated and raise.
-    """
-    if damping_method is None:
-        return 'tree+loop+ctr'
-    if damping_method in ('tree', 'tree-gtns'):
-        raise ValueError(f"damping_method={damping_method!r} is deprecated; use 'tree+loop+ctr' (GTNS removed)")
-    if damping_method == 'all':
-        return 'tree+loop+ctr+sn'
-    if damping_method not in ('loop+ctr', 'tree+loop', 'tree+loop+ctr', 'tree+loop+ctr+sn'):
-        raise ValueError(f"damping_method must be None / 'tree+loop+ctr' (default), 'tree+loop' or 'tree+loop+ctr+sn' (alias 'all'), got {damping_method!r}")
-    return damping_method
-
-
-def _resolve_use_gtns(use_GTNS, damping_method):
-    """Resolve the GTNS switch to a bool; see :meth:`RSDMultipolesPowerSpectrumCalculator.get_eft_pkmu`.
-
-    ``use_GTNS=None`` (the default) reproduces the ``damping_method``-driven behavior: GTNS is
-    kept for ``'loop+ctr'`` (where the tree-level Kaiser term is undamped, so nothing resums
-    it) and dropped for every ``'tree+...'`` method (where the tree-level damping resums it
-    non-perturbatively, so keeping it would double count at O(lambda^2)).  ``True`` / ``False``
-    force it on / off, whatever ``damping_method`` says.
-    """
-    if use_GTNS is None:
-        return not damping_method.startswith('tree')
-    if use_GTNS not in (True, False):
-        raise ValueError(f'use_GTNS must be None, True or False, got {use_GTNS!r}')
-    return bool(use_GTNS)
+def weights_leggauss(nx, sym=False):
+    """Gauss-Legendre nodes and weights, symmetrised onto [0, 1] when *sym*."""
+    import numpy as _np_native
+    x, wx = _np_native.polynomial.legendre.leggauss((1 + sym) * nx)
+    if sym:
+        x, wx = x[nx:], (wx[nx:] + wx[nx - 1::-1]) / 2.
+    return x, wx
 
 
 class RSDMultipolesPowerSpectrumCalculator:
@@ -1710,50 +1647,229 @@ class RSDMultipolesPowerSpectrumCalculator:
                  + (1 - np.exp(-k**2 * sigma2t)) * self.get_eft_pkmu(k, mu, pars, table_now, damping, damping_method=damping_method, use_GTNS=use_GTNS))
         return pkmu
 
-    def get_rsd_pkell(self, kobs, qpar, qper, pars, table, table_now,
-                      bias_scheme="folps", damping='lor', nmu=6, ells=(0, 2, 4), IR_resummation=True,
-                      damping_method=None, use_GTNS=None):
+    def get_eft_pkmu_monomials(self, kev, mu, table, damping_method=None, use_GTNS=None):
+        r""":meth:`get_eft_pkmu` decomposed over bias monomials.
+
+        Returns ``(damped, undamped, sigma2w)``, two :class:`BiasPolynomial` and the velocity
+        dispersion the kernel needs, such that for any bias vector
+
+        ``get_eft_pkmu(pars) == W * damped.evaluate(pars) + undamped.evaluate(pars)``
+
+        with ``W`` the Finger-of-God kernel built from *table*'s own ``sigma2w``.  Which blocks
+        sit in which part follows ``damping_method`` exactly as in :meth:`get_eft_pkmu`: the loop
+        bracket is always damped, the counterterms and the shot noise only when named.
+
+        Line by line the same expressions, with the biases symbolic.  The terms that look
+        non-polynomial are not: ``ATNS = b1**3 Af(mu, f0/b1)`` and ``DRSD = b1**4 Df(mu, f0/b1)``
+        carry a compensating power of ``f0/b1`` in every term.
         """
-        Computes the redshift-space power spectrum multipoles P_ell(k).
+        damping_method = _normalize_damping_method(damping_method)
+        use_gtns = _resolve_use_gtns(use_GTNS, damping_method)
 
-        Args:
-            kobs (array): Observed k.
-            qpar (float): Parallel AP parameter.
-            qper (float): Perpendicular AP parameter.
-            pars (list): Nuisance parameters.
-            table (list): table.
-            table_now (list): No-wiggle table.
-            bias_scheme (str): Bias scheme to use.
-            nmu (int): Number of points for GL integration
-            ells (tuple): Multipoles
-            IR_resummation (bool): Whether to apply IR resummation.
-            damping_method (str): Which terms the FoG kernel multiplies; see :meth:`get_rsd_pkmu`.
-            use_GTNS (bool): Whether to keep the perturbative GTNS term; see :meth:`get_eft_pkmu`.
+        if A_full_status:
+            (pkl, Fkoverf0, Ploop_dd, Ploop_dt, Ploop_tt, Pb1b2, Pb1bs2, Pb22, Pb2bs2,
+             Pb2s2, sigma23pkl, Pb2t, Pbs2t, I1udd_1, I2uud_1, I2uud_2, I3uuu_2, I3uuu_3,
+             I2uudd_1D, I2uudd_2D, I3uuud_2D, I3uuud_3D, I4uuuu_2D, I4uuuu_3D, I4uuuu_4D,
+             I3uuud_1B, I4uuuu_1B,
+             I1udd_1_b2, I2uud_1_b2, I2uud_2_b2, I1udd_1_bs2, I2uud_1_bs2, I2uud_2_bs2,
+             sigma2w, *_, f0) = table
+        else:
+            (pkl, Fkoverf0, Ploop_dd, Ploop_dt, Ploop_tt, Pb1b2, Pb1bs2, Pb22, Pb2bs2,
+             Pb2s2, sigma23pkl, Pb2t, Pbs2t, I1udd_1, I2uud_1, I2uud_2, I3uuu_2, I3uuu_3,
+             I2uudd_1D, I2uudd_2D, I3uuud_2D, I3uuud_3D, I4uuuu_2D, I4uuuu_3D, I4uuuu_4D,
+             I3uuud_1B, I4uuuu_1B,
+             sigma2w, *_, f0) = table
 
-        Returns:
-            array: Power spectrum multipoles for each ell.
+        fk = Fkoverf0 * f0
+        Pdt_L = pkl * Fkoverf0
+        Ptt_L = pkl * Fkoverf0**2
+        b1 = BiasPolynomial.variable('b1')
+        b2 = BiasPolynomial.variable('b2')
+        bs2 = BiasPolynomial.variable('bs')
+        b3nl = BiasPolynomial.variable('b3nl')
+
+        PddXloop = (b1 * b1 * Ploop_dd + b1 * b2 * (2 * Pb1b2) + b1 * bs2 * (2 * Pb1bs2)
+                    + b2 * b2 * Pb22 + b2 * bs2 * (2 * Pb2bs2) + bs2 * bs2 * Pb2s2
+                    + b1 * b3nl * (2 * sigma23pkl))
+        PdtXloop = b1 * Ploop_dt + b2 * Pb2t + bs2 * Pbs2t + b3nl * (Fkoverf0 * sigma23pkl)
+        PttXloop = BiasPolynomial.constant(Ploop_tt)
+
+        # b1**3 Af(mu, f0/b1): the f0**n term carries b1**(3-n).
+        ATNS = (b1 * b1 * (f0 * mu**2 * I1udd_1)
+                + b1 * (f0**2 * (mu**2 * I2uud_1 + mu**4 * I2uud_2))
+                + BiasPolynomial.constant(f0**3 * (mu**4 * I3uuu_2 + mu**6 * I3uuu_3)))
+        # b1**4 Df(mu, f0/b1), likewise.
+        DRSD = (b1 * b1 * (f0**2 * (mu**2 * I2uudd_1D + mu**4 * I2uudd_2D))
+                + b1 * (f0**3 * (mu**2 * I3uuud_1B + mu**4 * I3uuud_2D + mu**6 * I3uuud_3D))
+                + BiasPolynomial.constant(f0**4 * (mu**2 * I4uuuu_1B + mu**4 * I4uuuu_2D
+                                                   + mu**6 * I4uuuu_3D + mu**8 * I4uuuu_4D)))
+        PloopSPTs = PddXloop + PdtXloop * (2 * f0 * mu**2) + PttXloop * (mu**4 * f0**2) + ATNS + DRSD
+        if A_full_status:
+            # b1**3 Af_b2(mu, f0/b1) b2 / (2 b1) and the bs2 counterpart.
+            for coefficient, terms in [(b2, (I1udd_1_b2, I2uud_1_b2, I2uud_2_b2)),
+                                       (bs2, (I1udd_1_bs2, I2uud_1_bs2, I2uud_2_bs2))]:
+                first, second, third = terms
+                PloopSPTs = PloopSPTs + coefficient * (b1 * (f0 * mu**2 * first / 2)
+                                                      + BiasPolynomial.constant(
+                                                          f0**2 * (mu**2 * second + mu**4 * third) / 2))
+        if not (use_TNS_model_status or not use_gtns):
+            gtns = -((kev * mu * f0)**2 * sigma2w)
+            PloopSPTs = PloopSPTs + (b1 * b1 * (gtns * pkl)
+                                     + b1 * (gtns * 2 * f0 * mu**2 * Pdt_L)
+                                     + BiasPolynomial.constant(gtns * f0**2 * mu**4 * Ptt_L))
+
+        # (b1 + mu**2 fk)**2 pkl
+        PKaiserLs = (b1 * b1 * pkl + b1 * (2 * mu**2 * fk * pkl)
+                     + BiasPolynomial.constant(mu**4 * fk**2 * pkl))
+        PctNLOs = PKaiserLs * BiasPolynomial.variable('ctilde', (mu * kev * f0)**4 * sigma2w**2)
+        Pcts = (BiasPolynomial.variable('alpha0', kev**2 * pkl)
+                + BiasPolynomial.variable('alpha2', mu**2 * kev**2 * pkl)
+                + BiasPolynomial.variable('alpha4', mu**4 * kev**2 * pkl))
+        # Normalisation-free: PshotP multiplies sn0 / sn2 in get_rsd_pkell_from_monomials instead.
+        Pshot = (BiasPolynomial.variable('sn0', np.ones_like(kev * mu))
+                 + BiasPolynomial.variable('sn2', (kev * mu)**2))
+
+        damped, undamped = PloopSPTs, BiasPolynomial()
+        for block, flag in [(Pcts + PctNLOs, 'ctr'), (Pshot, 'sn')]:
+            if flag in damping_method:
+                damped = damped + block
+            else:
+                undamped = undamped + block
+        # Returned rather than read off a trailing index by the caller: the no-wiggle table has
+        # [sigma2w_NW, sigma2_NW, delta_sigma2_NW, f0] at the end, so table[-2] is *not* sigma2w
+        # there.  The positional unpacking above gets it right for both.
+        return damped, undamped, sigma2w
+
+    def get_rsd_pkmu_monomials(self, k, mu, table, table_now, IR_resummation=True,
+                               damping_method=None, use_GTNS=None):
+        r""":meth:`get_rsd_pkmu` decomposed over bias monomials.
+
+        Returns ``(damped_wiggle, damped_nowiggle, undamped, lam, sigma2w, sigma2w_nowiggle)``: three
+        :class:`BiasPolynomial` and the collocation variable
+        :math:`\Lambda = f_0^2 (k\mu)^2`, such that
+
+        ``get_rsd_pkmu(pars) == W[sigma2w] * damped_wiggle + W[sigma2w_NW] * damped_nowiggle + undamped``
+
+        evaluated at *pars*.  Two damped blocks rather than one because the wiggle and no-wiggle
+        halves of the IR resummation carry different :math:`\sigma_w^2`; they share one
+        :math:`\Lambda` grid, since that scalar enters the kernel at evaluation time.
         """
-        pars = self.set_bias_scheme(pars, bias_scheme=bias_scheme)
+        damping_method = _normalize_damping_method(damping_method)
+        if self.model == 'EFT':
+            damping_method = 'loop+ctr'
+        table = self.interp_table(k, table, A_full_status)
+        table_now = self.interp_table(k, table_now, A_full_status)
+        f0 = table[-1]
+        fk = table[1] * f0
+        pkl, pkl_now = table[0], table_now[0]
+        sigma2, delta_sigma2 = table_now[-3:-1]
+        sigma2t = ((1 + f0 * mu**2 * (2 + f0)) * sigma2 + (f0 * mu)**2 * (mu**2 - 1) * delta_sigma2
+                   if IR_resummation else 0)
+        wiggle_weight = np.exp(-k**2 * sigma2t)
 
-        def weights_leggauss(nx, sym=False):
-            """Return weights for Gauss-Legendre integration."""
-            import numpy as np
-            x, wx = np.polynomial.legendre.leggauss((1 + sym) * nx)
-            if sym:
-                x, wx = x[nx:], (wx[nx:] + wx[nx - 1::-1]) / 2.
-            return x, wx
+        b1 = BiasPolynomial.variable('b1')
+        tree = ((b1 * b1 + b1 * (2 * fk * mu**2) + BiasPolynomial.constant(fk**2 * mu**4))
+                * (pkl_now + wiggle_weight * (pkl - pkl_now) * (1 + k**2 * sigma2t)))
 
-        muobs, wmu = weights_leggauss(nmu, sym=True)
-        wmu = np.array([wmu * (2 * ell + 1) * legendre(ell)(muobs) for ell in ells])
-        jac, kap, muap = (qpar * qper**2)**(-1), self.k_ap(kobs[:, None], muobs, qpar, qper), self.mu_ap(muobs, qpar, qper)[None, :]
-        #print(muap[0])
-        pkmu = jac * self.get_rsd_pkmu(kap, muap, pars, table, table_now, IR_resummation, damping,
-                                       damping_method=damping_method, use_GTNS=use_GTNS)
-        return np.sum(pkmu * wmu[:, None, :], axis=-1)
+        damped_wiggle, undamped_wiggle, sigma2w = self.get_eft_pkmu_monomials(
+            k, mu, table, damping_method=damping_method, use_GTNS=use_GTNS)
+        damped_nowiggle, undamped_nowiggle, sigma2w_nowiggle = self.get_eft_pkmu_monomials(
+            k, mu, table_now, damping_method=damping_method, use_GTNS=use_GTNS)
 
+        damped_wiggle = damped_wiggle * wiggle_weight
+        damped_nowiggle = damped_nowiggle * (1. - wiggle_weight)
+        undamped = undamped_wiggle * wiggle_weight + undamped_nowiggle * (1. - wiggle_weight)
+        # The tree-level Kaiser term is damped with the *wiggle* table's sigma2w, so it joins the
+        # wiggle block; otherwise it is undamped.
+        if damping_method.startswith('tree'):
+            damped_wiggle = damped_wiggle + tree
+        else:
+            undamped = undamped + tree
+        lam = f0**2 * (k * mu)**2
+        return damped_wiggle, damped_nowiggle, undamped, lam, sigma2w, sigma2w_nowiggle
 
+    def get_rsd_pkmu_monomials_tables(self, kobs, qpar, qper, table, table_now, nmu=6, ells=(0, 2, 4),
+                                      IR_resummation=True, damping_method=None, use_GTNS=None,
+                                      fixed_bias=None):
+        r"""Bias-monomial tables on the ``(k, mu)`` quadrature grid, with the damping left unapplied.
 
-#Analytical marginalization....
+        Multiplying by the Finger-of-God kernel is a linear operator on the mu quadrature, which
+        has only ``nmu`` nodes, so keeping that axis represents the ``X_FoG`` dependence
+        **exactly** -- no collocation, no node count to tune.  (Equivalently, a ``(ell, ell', k)``
+        matrix in the Legendre basis; the node basis is the same statement with the operator
+        diagonal.)
+
+        This works because the k axis survives.  The bispectrum has to collocate in ``Lambda``
+        (:meth:`BispectrumCalculator.Sugiyama_Bell_monomials`) for the opposite reason: its
+        orientation quadrature has 800 nodes per pair against 6 here, so keeping that axis would
+        be ~400x larger rather than smaller -- and folding the window into an emulator's
+        coefficients, which is what makes the bispectrum tables affordable, removes the very axis
+        the damping depends on.  Here the theory grid is compacted instead
+        (`full_shape.tools.rebin_spectrum2_window`) and the window is applied per call.
+
+        Returns
+        -------
+        dict
+            ``'monomials'``; ``'undamped'``, ``'damped_wiggle'``, ``'damped_nowiggle'`` of shape
+            ``(n_monomials, n_k, nmu)``; ``'lam'`` ``(n_k, nmu)``; ``'sigma2w'``,
+            ``'sigma2w_nowiggle'``; ``'legendre_weights'`` ``(n_ells, nmu)`` and ``'ells'``.
+        """
+        muobs, weights_mu = weights_leggauss(nmu, sym=True)
+        legendre_weights = np.array([weights_mu * (2 * ell + 1) * legendre(ell)(muobs) for ell in ells])
+        jac = (qpar * qper**2)**(-1)
+        kap = self.k_ap(np.asarray(kobs)[:, None], muobs, qpar, qper)
+        muap = self.mu_ap(muobs, qpar, qper)[None, :]
+
+        damped_wiggle, damped_nowiggle, undamped, lam, sigma2w, sigma2w_nowiggle = \
+            self.get_rsd_pkmu_monomials(kap, muap, table, table_now, IR_resummation=IR_resummation,
+                                        damping_method=damping_method, use_GTNS=use_GTNS)
+        if fixed_bias:
+            damped_wiggle = damped_wiggle.substitute(fixed_bias)
+            damped_nowiggle = damped_nowiggle.substitute(fixed_bias)
+            undamped = undamped.substitute(fixed_bias)
+        monomials = sorted(set(damped_wiggle.monomials()) | set(damped_nowiggle.monomials())
+                           | set(undamped.monomials()))
+        # The AP jacobian is constant, so it rides with the tables rather than the contraction.
+        shape = np.shape(kap * muap)
+        stacked = {name: polynomial.stack(monomials, shape=shape) * jac for name, polynomial in
+                   [('damped_wiggle', damped_wiggle), ('damped_nowiggle', damped_nowiggle),
+                    ('undamped', undamped)]}
+        return {'monomials': monomials, 'lam': lam, 'sigma2w': sigma2w,
+                'sigma2w_nowiggle': sigma2w_nowiggle, 'legendre_weights': legendre_weights,
+                'ells': tuple(ells), **stacked}
+
+    def get_rsd_pkell_from_monomials(self, tables, pars, damping='lor', window_operator=None):
+        """Contract ``(k, mu)`` monomial *tables* from
+        :meth:`RSDMultipolesPowerSpectrumCalculator.get_rsd_pkmu_monomials_tables` with the biases.
+
+        Exact in ``X_FoG``: the kernel is evaluated at the quadrature nodes rather than interpolated.
+
+        Without *window_operator* the result is the multipoles, ``(n_ells, n_k)``.  With it -- the
+        window matrix already composed with the Legendre weights, shape ``(n_data, n_k, nmu)`` -- the
+        result is the flat data vector.  The operator cannot be folded into the tables beforehand,
+        since the damping sits between it and them; but it is cosmology-independent, so it is built
+        once and applied here.
+        """
+        # set_bias_scheme returns the folps convention, [b1, b2, bs2, b3nl, alpha0, alpha2,
+        # alpha4, ctilde, alphashot0, alphashot2, PshotP, X_FoG]; zip stops at the monomial
+        # variables, leaving PshotP and X_FoG to be handled separately.
+        names = ('b1', 'b2', 'bs', 'b3nl', 'alpha0', 'alpha2', 'alpha4', 'ctilde', 'sn0', 'sn2')
+        bias_values = dict(zip(names, pars))
+        # Pshot = PshotP (alphashot0 + alphashot2 (k mu)^2): folding the normalisation into the
+        # two stochastic values keeps the tables free of it, so they do not have to be rebuilt
+        # when the number density or the prior basis changes.
+        bias_values['sn0'] = bias_values['sn0'] * pars[10]
+        bias_values['sn2'] = bias_values['sn2'] * pars[10]
+        monomial_values = bias_monomial_values(bias_values, tables['monomials'])
+        total = tables['undamped']
+        for suffix, sigma2v in [('wiggle', tables['sigma2w']), ('nowiggle', tables['sigma2w_nowiggle'])]:
+            kernel = 1. - fog_damping_correction(pars[-1], tables['lam'], sigma2v=sigma2v,
+                                                 damping=damping, nlegs=2)
+            total = total + kernel * tables['damped_' + suffix]
+        pkmu = np.tensordot(monomial_values, total, axes=([0], [0]))   # (n_k, nmu)
+        if window_operator is None:
+            return np.einsum('lm,km->lk', tables['legendre_weights'], pkmu)
+        return np.einsum('dkm,km->d', window_operator, pkmu)
 
 def get_rsd_pkell_marg_const(
     kobs, qpar, qper, pars, table, table_now,
@@ -2216,6 +2332,309 @@ else:
 
 
 
+# ── bias-monomial decomposition of the bispectrum ─────────────────────────────
+
+class BiasPolynomial:
+    r"""
+    A polynomial in the bias parameters whose coefficients are arrays over the
+    :math:`(k_1, k_2)` pairs and the angular quadrature.
+
+    The redshift-space bispectrum is a polynomial in every bias parameter --
+    :meth:`BispectrumCalculator.Z2` is linear in ``(b1, b2, bs)``, ``Z1eft`` is linear in
+    ``(b1, c1, c2)``, the shot-noise term is linear in ``(Bshot, Pshot)`` plus one
+    ``Pshot**2`` -- and the only non-polynomial dependence is the Finger-of-God kernel, which
+    involves ``X_FoG`` alone.  Carrying the decomposition explicitly lets the whole
+    bias-independent part (the AP transform, the power spectrum interpolations, the ``Z2``
+    kernels and the angular quadrature) be evaluated once per cosmology instead of once per
+    parameter point.
+
+    A polynomial is a mapping from monomials to coefficient arrays, where a monomial is a
+    sorted tuple of ``(bias name, exponent)`` pairs -- ``(('b1', 2), ('c2', 1))`` for
+    :math:`b_1^2 c_2`, and ``()`` for the bias-independent term.  Naming the parameters in the
+    monomial itself keeps each statistic to the parameters it actually uses and makes the tables
+    self-describing: nothing downstream has to know a parameter ordering to read them.
+    Arithmetic mirrors the expressions in :meth:`BispectrumCalculator.bispectrum`, so the
+    monomial version can be read line by line against the direct one.
+
+    Parameters
+    ----------
+    terms : dict, optional
+        ``{monomial: coefficient}``, with *monomial* as above.
+    """
+    __slots__ = ('terms',)
+
+    def __init__(self, terms=None):
+        self.terms = dict(terms) if terms else {}
+
+    @staticmethod
+    def _product(left, right):
+        """The monomial obtained by multiplying two monomials: exponents add, per name."""
+        merged = dict(left)
+        for name, exponent in right:
+            merged[name] = merged.get(name, 0) + exponent
+        return tuple(sorted(merged.items()))
+
+    @classmethod
+    def constant(cls, coefficient):
+        """Return the polynomial whose only term is the bias-independent *coefficient*."""
+        return cls({(): coefficient})
+
+    @classmethod
+    def variable(cls, name, coefficient=1.):
+        """Return *coefficient* times the bias parameter *name*."""
+        return cls({((name, 1),): coefficient})
+
+    def __add__(self, other):
+        if not isinstance(other, BiasPolynomial):
+            other = BiasPolynomial.constant(other)
+        terms = dict(self.terms)
+        for exponents, coefficient in other.terms.items():
+            terms[exponents] = terms[exponents] + coefficient if exponents in terms else coefficient
+        return BiasPolynomial(terms)
+
+    __radd__ = __add__
+
+    def __neg__(self):
+        return BiasPolynomial({exponents: -coefficient for exponents, coefficient in self.terms.items()})
+
+    def __sub__(self, other):
+        return self + (-other if isinstance(other, BiasPolynomial) else BiasPolynomial.constant(-other))
+
+    def __rsub__(self, other):
+        return (-self) + other
+
+    def __mul__(self, other):
+        if not isinstance(other, BiasPolynomial):  # scalar or array factor
+            return BiasPolynomial({exponents: coefficient * other for exponents, coefficient in self.terms.items()})
+        terms = {}
+        for left_exponents, left in self.terms.items():
+            for right_exponents, right in other.terms.items():
+                exponents = self._product(left_exponents, right_exponents)
+                product = left * right
+                terms[exponents] = terms[exponents] + product if exponents in terms else product
+        return BiasPolynomial(terms)
+
+    __rmul__ = __mul__
+
+    def monomials(self):
+        """Return the monomials present, in a deterministic (sorted) order."""
+        return sorted(self.terms)
+
+    def stack(self, monomials, shape=None):
+        """Return the coefficients for *monomials*, broadcast to a common shape and stacked.
+
+        Missing monomials contribute zeros, so several polynomials can share one basis.  *shape*
+        overrides the shape inferred from this polynomial's own terms, and is required when it
+        has none -- which happens legitimately, e.g. the undamped block when ``damping_method``
+        damps every term.
+        """
+        if shape is None:
+            shape = np.broadcast_shapes(*[np.shape(coefficient) for coefficient in self.terms.values()])
+        zero = np.zeros(shape)
+        return np.array([np.broadcast_to(self.terms[exponents], shape) if exponents in self.terms else zero
+                         for exponents in monomials])
+
+    def substitute(self, values):
+        """Return this polynomial with the bias parameters in *values* replaced by numbers.
+
+        ``{'c2': 0.}`` collapses every monomial containing ``c2``, which is worth doing when a
+        parameter is held fixed in the fit: it is the size of the monomial basis, not the number
+        of bias parameters, that sets the table size.
+        """
+        terms = {}
+        for exponents, coefficient in self.terms.items():
+            reduced, dropped = [], False
+            for name, exponent in exponents:
+                if name not in values:
+                    reduced.append((name, exponent))
+                    continue
+                value = values[name]
+                if value == 0:
+                    dropped = True
+                    break
+                coefficient = coefficient * value**exponent
+            if dropped:
+                continue
+            key = tuple(reduced)
+            terms[key] = terms[key] + coefficient if key in terms else coefficient
+        return BiasPolynomial(terms)
+
+    def evaluate(self, bias_values):
+        """Evaluate at *bias_values*, a mapping of bias name to value (missing names are zero)."""
+        total = 0.
+        for exponents, coefficient in self.terms.items():
+            for name, exponent in exponents:
+                coefficient = coefficient * bias_values.get(name, 0.)**exponent
+            total = total + coefficient
+        return total
+
+
+def bias_monomial_values(bias_values, monomials):
+    """Return the monomial vector :math:`m_j` matching :meth:`BiasPolynomial.stack`'s *monomials*.
+
+    Each monomial names the bias parameters it involves, so no shared ordering is needed;
+    *bias_values* maps names to values and names it omits are taken as zero, which is what a
+    monomial containing them contributes.
+    """
+    out = []
+    for exponents in monomials:
+        term = 1.
+        for name, exponent in exponents:
+            term = term * bias_values.get(name, 0.)**exponent
+        out.append(term)
+    return np.array(out)
+
+
+def fog_lambda_nodes(k1k2pairs=None, f_max=1.2, n_nodes=24, dynamic_range=1e-5, lambda_max=None):
+    r"""Return a fixed log-spaced grid of the FoG collocation variable
+    :math:`\Lambda = \frac{f^2}{2}\sum_i (k_i \mu_i)^2`.
+
+    Every damping kernel of :func:`fog_damping` depends on the angles **only** through
+    :math:`\Lambda` (for ``'lor'`` and ``'exp'`` through :math:`X^2 \Lambda`, for ``'vdg'``
+    through both :math:`\Lambda` and :math:`X^2\Lambda`), so interpolating the kernel on a grid
+    in :math:`\Lambda` factorizes the ``X_FoG`` dependence out of the angular integral without
+    approximating the ``X_FoG`` dependence itself.
+
+    The grid is logarithmic because :math:`1/(1 + X^2\Lambda)` is a single fixed-shape logistic
+    sigmoid in :math:`\log\Lambda`, merely translated by :math:`\log X^2`: one grid is then
+    uniformly accurate over the whole ``X_FoG`` prior, which a grid in ``X_FoG`` would not be.
+
+    The nodes must not depend on cosmology (they are part of the emulated table structure), so
+    the range is set by the requested wavenumbers and a generous bound *f_max* on the growth
+    rate; :math:`\Lambda` outside it is clamped to the end nodes.
+    """
+    import numpy as _np_native  # the node grid is fixed structure, never a traced array
+    if lambda_max is None:
+        k1k2 = _np_native.asarray(k1k2pairs)
+        k1_max, k2_max = _np_native.max(k1k2[:, 0]), _np_native.max(k1k2[:, 1])
+        k3_max = k1_max + k2_max  # |k3| <= k1 + k2, attained at x12 = 1
+        lambda_max = 0.5 * f_max**2 * (k1_max**2 + k2_max**2 + k3_max**2)
+    return _np_native.geomspace(lambda_max * dynamic_range, lambda_max, n_nodes)
+
+
+def fog_collocation_weights(lam, lambda_nodes):
+    """Return the interpolation weights of *lam* on *lambda_nodes*, shape ``lam.shape + (n_nodes,)``.
+
+    Local cubic Lagrange interpolation in :math:`\\log\\Lambda` on the four nodes bracketing each
+    point: fourth-order accurate in the node spacing, and the weights sum to one, so a kernel
+    that is constant in :math:`\\Lambda` is reproduced exactly.
+    """
+    import numpy as _np_native  # the nodes are fixed structure, never a traced array
+    log_nodes = _np_native.log(_np_native.asarray(lambda_nodes))
+    n_nodes = len(log_nodes)
+    if n_nodes < 4:
+        raise ValueError(f'need at least 4 collocation nodes, got {n_nodes}')
+    step = log_nodes[1] - log_nodes[0]
+    position = (np.log(np.clip(lam, lambda_nodes[0], lambda_nodes[-1])) - log_nodes[0]) / step
+    index = np.clip(np.floor(position) - 1, 0, n_nodes - 4)
+    offset = position - (index + 1.)
+    lagrange = [-offset * (offset - 1.) * (offset - 2.) / 6.,
+                (offset + 1.) * (offset - 1.) * (offset - 2.) / 2.,
+                -(offset + 1.) * offset * (offset - 2.) / 2.,
+                (offset + 1.) * offset * (offset - 1.) / 6.]
+    node_index = np.arange(n_nodes)
+    basis = 0.
+    for shift, weight in enumerate(lagrange):
+        basis = basis + weight[..., None] * (node_index == (index + shift)[..., None])
+    return basis
+
+
+def fog_damping_correction(X_FoG, lambda_nodes, sigma2v=1., damping='lor', nlegs=3):
+    r"""Return :math:`1 - W(X_\mathrm{FoG}, \Lambda_n)` at the collocation nodes.
+
+    The damped block is reconstructed as ``damped - sum_n correction_n * tables_n``: writing the
+    kernel as a *correction* to the undamped result rather than as the kernel itself makes the
+    small-:math:`\Lambda` end harmless (the correction vanishes there, so the grid can be
+    truncated) and makes ``X_FoG = 0`` exact by construction.
+    """
+    lam = np.asarray(lambda_nodes)
+    lX2 = X_FoG**2 * lam
+    if damping is None:
+        return np.zeros_like(lam)
+    if damping == 'lor':
+        return 1. - 1. / (1. + lX2 * sigma2v)
+    if damping == 'exp':
+        return 1. - np.exp(-lX2 * sigma2v)
+    if damping == 'vdg':
+        denom = 1. + lX2
+        return 1. - np.exp(-lam * sigma2v / denom) / denom**(nlegs - 1.5)
+    raise ValueError(f"damping must be None, 'exp', 'lor' or 'vdg', got {damping!r}")
+
+
+
+
+def fog_damping(*kmu_X, f=1., sigma2v=1., damping='lor'):
+    r"""
+    Finger-of-God damping kernel W, following jaxpower's pt.py convention.
+
+    Parameters
+    ----------
+    kmu_X : tuples
+        One ``(k * mu, X_FoG)`` pair per power spectrum leg: two (identical) pairs
+        for the auto power spectrum, three for the bispectrum.
+    f : float
+        Growth rate :math:`f_0` (each ``k * mu`` is multiplied by ``f``).
+    sigma2v : float
+        Velocity dispersion :math:`\sigma_v^2`.
+    damping : {None, 'exp', 'lor', 'vdg'}
+        ``None`` returns 1 (no damping).
+
+    Notes
+    -----
+    With :math:`\lambda_X^2 = \frac{f^2}{2} \sum_i (k_i \mu_i X_i)^2` and
+    :math:`\lambda^2 = \frac{f^2}{2} \sum_i (k_i \mu_i)^2`:
+    'exp' returns :math:`e^{-\lambda_X^2 \sigma_v^2}`, 'lor' returns
+    :math:`1 / (1 + \lambda_X^2 \sigma_v^2)`, and 'vdg' returns
+    :math:`e^{-\lambda^2 \sigma_v^2 / (1 + \lambda_X^2)} / (1 + \lambda_X^2)^{n - 3/2}`
+    with :math:`n` the number of legs (1/2 for the power spectrum, 3/2 for the bispectrum).
+    """
+    if damping is None:
+        return 1.
+    lX2 = 0.5 * f**2 * sum((kmu * X)**2 for kmu, X in kmu_X)
+    if damping == 'lor':
+        return 1. / (1. + lX2 * sigma2v)
+    if damping == 'exp':
+        return np.exp(-lX2 * sigma2v)
+    if damping == 'vdg':
+        l2 = 0.5 * f**2 * sum(kmu**2 for kmu, _ in kmu_X)
+        denom = 1. + lX2
+        return np.exp(-l2 * sigma2v / denom) / denom**(len(kmu_X) - 1.5)
+    raise ValueError(f"damping must be None, 'exp', 'lor' or 'vdg', got {damping!r}")
+
+
+def _normalize_damping_method(damping_method):
+    """Normalize / validate ``damping_method``; see :meth:`RSDMultipolesPowerSpectrumCalculator.get_rsd_pkmu`.
+
+    ``None`` (the default) is an alias for ``'tree+loop+ctr'``, ``'all'`` for
+    ``'tree+loop+ctr+sn'``; legacy ``'tree'`` and ``'tree-gtns'`` are deprecated and raise.
+    """
+    if damping_method is None:
+        return 'tree+loop+ctr'
+    if damping_method in ('tree', 'tree-gtns'):
+        raise ValueError(f"damping_method={damping_method!r} is deprecated; use 'tree+loop+ctr' (GTNS removed)")
+    if damping_method == 'all':
+        return 'tree+loop+ctr+sn'
+    if damping_method not in ('loop+ctr', 'tree+loop', 'tree+loop+ctr', 'tree+loop+ctr+sn'):
+        raise ValueError(f"damping_method must be None / 'tree+loop+ctr' (default), 'tree+loop' or 'tree+loop+ctr+sn' (alias 'all'), got {damping_method!r}")
+    return damping_method
+
+
+def _resolve_use_gtns(use_GTNS, damping_method):
+    """Resolve the GTNS switch to a bool; see :meth:`RSDMultipolesPowerSpectrumCalculator.get_eft_pkmu`.
+
+    ``use_GTNS=None`` (the default) reproduces the ``damping_method``-driven behavior: GTNS is
+    kept for ``'loop+ctr'`` (where the tree-level Kaiser term is undamped, so nothing resums
+    it) and dropped for every ``'tree+...'`` method (where the tree-level damping resums it
+    non-perturbatively, so keeping it would double count at O(lambda^2)).  ``True`` / ``False``
+    force it on / off, whatever ``damping_method`` says.
+    """
+    if use_GTNS is None:
+        return not damping_method.startswith('tree')
+    if use_GTNS not in (True, False):
+        raise ValueError(f'use_GTNS must be None, True or False, got {use_GTNS!r}')
+    return bool(use_GTNS)
+
+
 
 
 class BispectrumCalculator:
@@ -2463,6 +2882,190 @@ class BispectrumCalculator:
         bispectrum = bispectrum / alpha**2
 
         return bispectrum
+
+    def Z2_monomials(self, ki, kj, xij, mui, muj, f):
+        """:meth:`Z2` as a :class:`BiasPolynomial`; linear in ``b1``, ``b2`` and ``bs``."""
+        km = ki * mui + kj * muj
+        F2 = 5/7 + xij/2 * (ki/kj + kj/ki) + 2/7 * xij**2
+        G2 = 3/7 + xij/2 * (ki/kj + kj/ki) + 4/7 * xij**2
+        mu2 = km**2 / (ki**2 + kj**2 + 2 * ki * kj * xij)
+        # term2 = km/2 * (mui/ki * f * (b1 + f muj**2) + muj/kj * f * (b1 + f mui**2)),
+        # split into its b1-linear and bias-independent parts.
+        term2_b1 = km / 2 * f * (mui / ki + muj / kj)
+        term2_constant = km / 2 * f**2 * (mui / ki * muj**2 + muj / kj * mui**2)
+        return (BiasPolynomial.variable('b2', 0.5)
+                + BiasPolynomial.variable('bs', (xij**2 - 1/3) / 2)
+                + BiasPolynomial.variable('b1', term2_b1 + F2)
+                + BiasPolynomial.constant(term2_constant + f * mu2 * G2))
+
+    def bispectrum_monomials(self, k1, k2, x12, mu1, phi, f, sigma2v, Sigma2, deltaSigma2,
+                             qpar, qperp, k_pkl_pklnw, interpolation_method='linear'):
+        r""":meth:`bispectrum` decomposed over bias monomials.
+
+        Returns ``(damped, undamped, lam)``: two :class:`BiasPolynomial` and the collocation
+        variable :math:`\Lambda = \frac{f^2}{2}\sum_i (k_i\mu_i)^2`, such that for any bias
+        vector and any Finger-of-God kernel
+
+        ``bispectrum(bpars) == W(X_FoG, lam) * damped.evaluate(bpars) + undamped.evaluate(bpars)``
+
+        with ``W`` the kernel of :func:`fog_damping`.  The shot-noise term is the undamped part.
+        Line-by-line the same expressions as :meth:`bispectrum`, with the bias parameters
+        carried symbolically instead of substituted.
+        """
+        cosphi = np.cos(phi)
+        APtransf = self.APtransforms(k1, k2, x12, mu1, cosphi, qpar, qperp)
+        k1AP, k2AP, k3AP, x12AP, x23AP, x31AP, mu1AP, mu2AP, mu3AP, cosphi = APtransf
+
+        k_ = k_pkl_pklnw[0]
+        pkl_ = k_pkl_pklnw[1]
+        pklnw_ = k_pkl_pklnw[2]
+
+        interp_method = interpolation_method
+        pk1 = self.interpolation_b(k1AP, k_, pkl_, method=interp_method)
+        pk1nw = self.interpolation_b(k1AP, k_, pklnw_, method=interp_method)
+        pk2 = self.interpolation_b(k2AP, k_, pkl_, method=interp_method)
+        pk2nw = self.interpolation_b(k2AP, k_, pklnw_, method=interp_method)
+        pk3 = self.interpolation_b(k3AP, k_, pkl_, method=interp_method)
+        pk3nw = self.interpolation_b(k3AP, k_, pklnw_, method=interp_method)
+
+        e1IR = (1 + f*mu1AP**2 * (2 + f))*Sigma2 + (f*mu1AP)**2 * (mu1AP**2 - 1) * deltaSigma2
+        e2IR = (1 + f*mu2AP**2 * (2 + f))*Sigma2 + (f*mu2AP)**2 * (mu2AP**2 - 1) * deltaSigma2
+        e3IR = (1 + f*mu3AP**2 * (2 + f))*Sigma2 + (f*mu3AP)**2 * (mu3AP**2 - 1) * deltaSigma2
+
+        pkIR1 = pk1nw + (pk1 - pk1nw)*np.exp(-e1IR*k1AP**2)
+        pkIR2 = pk2nw + (pk2 - pk2nw)*np.exp(-e2IR*k2AP**2)
+        pkIR3 = pk3nw + (pk3 - pk3nw)*np.exp(-e3IR*k3AP**2)
+
+        f1 = f2 = f3 = f
+
+        def Z1eft(muAP, kAP, fi):
+            """``b1 + fi muAP**2 - (c1 muAP**2 + c2 muAP**4) kAP**2`` as a polynomial."""
+            return (BiasPolynomial.variable('b1')
+                    + BiasPolynomial.constant(fi * muAP**2)
+                    - BiasPolynomial.variable('c1', muAP**2 * kAP**2)
+                    - BiasPolynomial.variable('c2', muAP**4 * kAP**2))
+
+        Z1eft1, Z1eft2, Z1eft3 = Z1eft(mu1AP, k1AP, f1), Z1eft(mu2AP, k2AP, f2), Z1eft(mu3AP, k3AP, f3)
+        leg1, leg2, leg3 = Z1eft1 * pkIR1, Z1eft2 * pkIR2, Z1eft3 * pkIR3
+
+        B12 = 2 * self.Z2_monomials(k1AP, k2AP, x12AP, mu1AP, mu2AP, f) * leg1 * leg2
+        B23 = 2 * self.Z2_monomials(k2AP, k3AP, x23AP, mu2AP, mu3AP, f) * leg2 * leg3
+        B31 = 2 * self.Z2_monomials(k3AP, k1AP, x31AP, mu3AP, mu1AP, f) * leg3 * leg1
+
+        Bshot, Pshot = BiasPolynomial.variable('Bshot'), BiasPolynomial.variable('Pshot')
+        b1 = BiasPolynomial.variable('b1')
+        shot = ((b1 * Bshot + Pshot * (2.0 * f1 * mu1AP**2)) * leg1
+                + (b1 * Bshot + Pshot * (2.0 * f2 * mu2AP**2)) * leg2
+                + (b1 * Bshot + Pshot * (2.0 * f3 * mu3AP**2)) * leg3
+                + Pshot * Pshot)
+
+        alpha = qpar * qperp**2
+        lam = 0.5 * f**2 * ((k1AP * mu1AP)**2 + (k2AP * mu2AP)**2 + (k3AP * mu3AP)**2)
+        return (B12 + B23 + B31) * (1. / alpha**2), shot * (1. / alpha**2), lam
+
+    def Sugiyama_Bell_monomials(self, f, k_pkl_pklnw, k1k2pairs, qpar, qper,
+                                precision=[8, 10, 10], multipoles=['B000', 'B202'],
+                                renormalize=True, interpolation_method='linear',
+                                lambda_nodes=None, n_lambda=12, fixed_bias=None):
+        r"""Angular-integrated bias-monomial tables for :meth:`Sugiyama_Bell`.
+
+        Everything :meth:`Sugiyama_Bell` recomputes per parameter point that does not actually
+        depend on the biases -- the AP transform, six power spectrum interpolations, the IR
+        resummation, the ``Z2`` kernels and the 3-D angular quadrature -- is done once here, and
+        the ``X_FoG`` dependence is factorized onto a collocation grid in
+        :math:`\Lambda` (see :func:`fog_lambda_nodes`).  A parameter point then costs one
+        contraction, :meth:`Sugiyama_Bell_from_monomials`.
+
+        Returns
+        -------
+        dict
+            ``'monomials'``: monomials as ``(bias name, exponent)`` pairs;
+            ``'undamped'`` and ``'damped'``: ``(n_monomials, n_multipoles, n_pairs)``;
+            ``'correction'``: ``(n_monomials, n_lambda, n_multipoles, n_pairs)``;
+            ``'lambda_nodes'``, ``'sigma2v'``, ``'multipoles'``.
+        """
+        all_multipoles = ['B000', 'B110', 'B220', 'B202', 'B022', 'B112', 'B222']
+        for mp in multipoles:
+            if mp not in all_multipoles:
+                raise ValueError(f"Invalid multipole '{mp}'. Available: {all_multipoles}")
+
+        k1k2pairs = np.asarray(k1k2pairs)
+        k1 = k1k2pairs[:, 0][:, None, None, None]
+        k2 = k1k2pairs[:, 1][:, None, None, None]
+
+        tablesGL = self.tablesGL_f(precision)
+        sigma2v, Sigma2, deltaSigma2 = self.sigmas(k_pkl_pklnw[0], k_pkl_pklnw[1])
+
+        phiGL, xGL, muGL = tablesGL
+        phi, wphi = phiGL[:, 0], phiGL[:, 1]
+        x, wx = xGL[:, 0], xGL[:, 1]
+        mu, wmu = muGL[:, 0], muGL[:, 1]
+
+        x_mesh = x[None, :, None, None]
+        mu_mesh = mu[None, None, :, None]
+        phi_mesh = phi[None, None, None, :]
+        cosphi = np.cos(phi_mesh)
+        cos2phi = np.cos(2 * phi_mesh)
+
+        damped, undamped, lam = self.bispectrum_monomials(
+            k1, k2, x_mesh, mu_mesh, phi_mesh, f, sigma2v, Sigma2, deltaSigma2,
+            qpar, qper, k_pkl_pklnw, interpolation_method=interpolation_method)
+        if fixed_bias:
+            damped, undamped = damped.substitute(fixed_bias), undamped.substitute(fixed_bias)
+
+        if lambda_nodes is None:
+            lambda_nodes = fog_lambda_nodes(k1k2pairs, n_nodes=n_lambda)
+        basis = fog_collocation_weights(lam, lambda_nodes)  # (..., n_lambda)
+
+        # One monomial basis shared by both polynomials, so the two tables can be added.
+        monomials = sorted(set(damped.monomials()) | set(undamped.monomials()))
+        damped_coeffs = damped.stack(monomials)      # (n_monomials, n_pairs, n_x, n_mu, n_phi)
+        undamped_coeffs = undamped.stack(monomials)
+
+        Hl1l2L_dict = {'B000': 1.0, 'B110': -1 / np.sqrt(3), 'B220': 1 / np.sqrt(5),
+                       'B202': 1 / np.sqrt(5), 'B022': 1 / np.sqrt(5), 'B112': np.sqrt(2 / 15),
+                       'B222': -2 / np.sqrt(70)}
+
+        damped_out, undamped_out, correction_out = [], [], []
+        for mp in multipoles:
+            integrand = self._compute_single_integrand(mp, x_mesh, mu_mesh, phi_mesh, cosphi, cos2phi)
+            # The angular integration of Sugiyama_Bl1l2L, as a single set of quadrature weights.
+            weight = 2 * integrand * wphi[None, None, None, :] * wmu[None, None, :, None] * wx[None, :, None, None]
+            if renormalize:
+                weight = weight * Hl1l2L_dict[mp]
+            damped_out.append(np.sum(damped_coeffs * weight, axis=(-3, -2, -1)))
+            undamped_out.append(np.sum(undamped_coeffs * weight, axis=(-3, -2, -1)))
+            correction_out.append(np.einsum('jpxyz,pxyzn->jnp', damped_coeffs * weight, basis))
+
+        return {'monomials': monomials,
+                'fixed_bias': dict(fixed_bias or {}),
+                'multipoles': list(multipoles),
+                'lambda_nodes': np.asarray(lambda_nodes),
+                'sigma2v': sigma2v,
+                'damped': np.stack(damped_out, axis=1),
+                'undamped': np.stack(undamped_out, axis=1),
+                'correction': np.stack(correction_out, axis=2)}
+
+    def Sugiyama_Bell_from_monomials(self, tables, bpars, damping='lor'):
+        """Contract monomial *tables* from :meth:`BispectrumCalculator.Sugiyama_Bell_monomials`
+        with the bias parameters, returning the tables' trailing axes -- ``(n_multipoles, n_pairs)``
+        as built, or whatever a linear map has since contracted them onto.
+
+        *bpars* is ``[b1, b2, bs, c1, c2, Bshot, Pshot, X_FoG]`` in the folps convention.
+        """
+        # set_bias_scheme returns the folps convention, [b1, b2, bs, c1, c2, Bshot, Pshot, X_FoG].
+        # zip stops at the names, dropping X_FoG: it is the one parameter the decomposition does
+        # not absorb, and it enters through the damping correction below instead.
+        names = ('b1', 'b2', 'bs', 'c1', 'c2', 'Bshot', 'Pshot')
+        monomial_values = bias_monomial_values(dict(zip(names, bpars)), tables['monomials'])
+        correction = fog_damping_correction(bpars[-1], tables['lambda_nodes'], sigma2v=tables['sigma2v'],
+                                            damping=damping)
+        # Only two axes are named: the monomial axis (first) and, on the correction table, the
+        # collocation axis (second).  Everything after them is left alone, so the same contraction
+        # works whether the trailing axes are (n_multipoles, n_pairs) or the data bins a window
+        # matrix has already been contracted onto.
+        damped = tables['damped'] - np.tensordot(correction, tables['correction'], axes=([0], [1]))
+        return np.tensordot(monomial_values, tables['undamped'] + damped, axes=([0], [0]))
 
     def interpolation_b(self, k_out, k_in, pk_in, method='cubic'):
         """Interpolation function
